@@ -1,67 +1,146 @@
-<ui version="4.0" >
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
  <class>QassessmentWizardDialogBase</class>
- <widget class="QDialog" name="QassessmentWizardDialogBase" >
-  <property name="geometry" >
+ <widget class="QWizard" name="QassessmentWizardDialogBase">
+  <property name="geometry">
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>300</height>
+    <width>600</width>
+    <height>500</height>
    </rect>
   </property>
-  <property name="windowTitle" >
+  <property name="windowTitle">
    <string>Assessment Wizard</string>
   </property>
-  <widget class="QDialogButtonBox" name="button_box" >
-   <property name="geometry" >
-    <rect>
-     <x>30</x>
-     <y>240</y>
-     <width>341</width>
-     <height>32</height>
-    </rect>
+  <property name="wizardStyle">
+   <enum>QWizard::ModernStyle</enum>
+  </property>
+  <widget class="QWizardPage" name="page_1">
+   <property name="title">
+    <string>Page 1 - Initial Configuration</string>
    </property>
-   <property name="orientation" >
-    <enum>Qt::Horizontal</enum>
+   <property name="subTitle">
+    <string>Configure the initial parameters for the assessment</string>
    </property>
-   <property name="standardButtons" >
-    <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+   <layout class="QVBoxLayout" name="verticalLayout_page1">
+    <item>
+     <layout class="QFormLayout" name="formLayout_page1">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_name">
+        <property name="text">
+         <string>Name:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="lineEdit_name">
+        <property name="placeholderText">
+         <string>Enter name</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_description">
+        <property name="text">
+         <string>Description:</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QTextEdit" name="textEdit_description">
+        <property name="placeholderText">
+         <string>Enter description</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <spacer name="verticalSpacer_page1">
+      <property name="orientation">
+       <enum>Qt::Vertical</enum>
+      </property>
+      <property name="sizeHint" stdset="0">
+       <size>
+        <width>20</width>
+        <height>40</height>
+       </size>
+      </property>
+     </spacer>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QWizardPage" name="page_2">
+   <property name="title">
+    <string>Page 2 - Data Selection</string>
    </property>
+   <property name="subTitle">
+    <string>Select the data layers and parameters</string>
+   </property>
+   <layout class="QVBoxLayout" name="verticalLayout_page2">
+    <item>
+     <widget class="QLabel" name="label_page2_info">
+      <property name="text">
+       <string>This is the second page of the wizard. Add your controls here.</string>
+      </property>
+      <property name="wordWrap">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <spacer name="verticalSpacer_page2">
+      <property name="orientation">
+       <enum>Qt::Vertical</enum>
+      </property>
+      <property name="sizeHint" stdset="0">
+       <size>
+        <width>20</width>
+        <height>40</height>
+       </size>
+      </property>
+     </spacer>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QWizardPage" name="page_3">
+   <property name="title">
+    <string>Page 3 - Processing and Results</string>
+   </property>
+   <property name="subTitle">
+    <string>Review settings and execute the assessment</string>
+   </property>
+   <layout class="QVBoxLayout" name="verticalLayout_page3">
+    <item>
+     <widget class="QLabel" name="label_page3_info">
+      <property name="text">
+       <string>This is the third page of the wizard. Add your controls here.</string>
+      </property>
+      <property name="wordWrap">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <spacer name="verticalSpacer_page3">
+      <property name="orientation">
+       <enum>Qt::Vertical</enum>
+      </property>
+      <property name="sizeHint" stdset="0">
+       <size>
+        <width>20</width>
+        <height>40</height>
+       </size>
+      </property>
+     </spacer>
+    </item>
+   </layout>
   </widget>
  </widget>
  <resources/>
- <connections>
-  <connection>
-   <sender>button_box</sender>
-   <signal>accepted()</signal>
-   <receiver>QassessmentWizardDialogBase</receiver>
-   <slot>accept()</slot>
-   <hints>
-    <hint type="source_label" >
-     <x>248</x>
-     <y>254</y>
-    </hint>
-    <hint type="destination_label" >
-     <x>157</x>
-     <y>274</y>
-    </hint>
-   </hints>
-  </connection>
-  <connection>
-   <sender>button_box</sender>
-   <signal>rejected()</signal>
-   <receiver>QassessmentWizardDialogBase</receiver>
-   <slot>reject()</slot>
-   <hints>
-    <hint type="source_label" >
-     <x>316</x>
-     <y>260</y>
-    </hint>
-    <hint type="destination_label" >
-     <x>286</x>
-     <y>274</y>
-    </hint>
-   </hints>
-  </connection>
- </connections>
+ <connections/>
 </ui>

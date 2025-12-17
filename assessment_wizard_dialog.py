@@ -32,7 +32,7 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'assessment_wizard_dialog_base.ui'))
 
 
-class QassessmentWizardDialog(QtWidgets.QDialog, FORM_CLASS):
+class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def __init__(self, parent=None):
         """Constructor."""
         super(QassessmentWizardDialog, self).__init__(parent)
@@ -42,3 +42,26 @@ class QassessmentWizardDialog(QtWidgets.QDialog, FORM_CLASS):
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+
+        # Initialize wizard pages
+        self.initialize_page_1()
+        self.initialize_page_2()
+        self.initialize_page_3()
+
+    def initialize_page_1(self):
+        """Initialize the first wizard page."""
+        # Page 1 contains name and description fields
+        # Access them using:
+        # - self.lineEdit_name
+        # - self.textEdit_description
+        pass
+
+    def initialize_page_2(self):
+        """Initialize the second wizard page."""
+        # Add your page 2 initialization logic here
+        pass
+
+    def initialize_page_3(self):
+        """Initialize the third wizard page."""
+        # Add your page 3 initialization logic here
+        pass
