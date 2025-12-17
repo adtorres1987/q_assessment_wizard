@@ -26,6 +26,7 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
+from qgis.core import QgsProject
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -54,7 +55,26 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Access them using:
         # - self.lineEdit_name
         # - self.textEdit_description
-        pass
+        # - self.listWidget_layers
+
+        # Populate the layer list with available layers from QGIS
+        self.populate_layers()
+
+    def populate_layers(self):
+        """Populate the list widget with available layers from the QGIS project."""
+        self.listWidget_layers.clear()
+
+        # Get all layers from the current QGIS project
+        layers = QgsProject.instance().mapLayers().values()
+
+        # Add each layer to the list widget
+        for layer in layers:
+            self.listWidget_layers.addItem(layer.name())
+
+    def get_selected_layers(self):
+        """Get the list of selected layer names."""
+        selected_items = self.listWidget_layers.selectedItems()
+        return [item.text() for item in selected_items]
 
     def initialize_page_2(self):
         """Initialize the second wizard page."""

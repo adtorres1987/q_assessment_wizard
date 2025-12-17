@@ -60,17 +60,21 @@
      </layout>
     </item>
     <item>
-     <spacer name="verticalSpacer_page1">
-      <property name="orientation">
-       <enum>Qt::Vertical</enum>
+     <widget class="QLabel" name="label_layers">
+      <property name="text">
+       <string>Select layers to include in the assessment:</string>
       </property>
-      <property name="sizeHint" stdset="0">
-       <size>
-        <width>20</width>
-        <height>40</height>
-       </size>
+     </widget>
+    </item>
+    <item>
+     <widget class="QListWidget" name="listWidget_layers">
+      <property name="selectionMode">
+       <enum>QAbstractItemView::MultiSelection</enum>
       </property>
-     </spacer>
+      <property name="toolTip">
+       <string>Select one or more layers (hold Ctrl/Cmd to select multiple)</string>
+      </property>
+     </widget>
     </item>
    </layout>
   </widget>
