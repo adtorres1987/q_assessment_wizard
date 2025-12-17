@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/assessment_wizard" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
