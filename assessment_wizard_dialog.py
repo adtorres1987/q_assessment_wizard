@@ -26,6 +26,7 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
+from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem
 from qgis.core import QgsProject
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -34,6 +35,12 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
+    # Layer status constants
+    STATUS_INCLUDE = "Include in assessment"
+    STATUS_TARGET = "Include as Target"
+    STATUS_SPATIAL_MARKER = "Spatial Marker"
+    STATUS_DO_NOT_INCLUDE = "Do not include"
+
     def __init__(self, parent=None):
         """Constructor."""
         super(QassessmentWizardDialog, self).__init__(parent)
@@ -55,26 +62,105 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Access them using:
         # - self.lineEdit_name
         # - self.textEdit_description
-        # - self.listWidget_layers
+        # - self.tableWidget_layers
 
-        # Populate the layer list with available layers from QGIS
+        # Populate the layer table with available layers from QGIS
         self.populate_layers()
 
+        # Set up page validation
+        self.page_1.validatePage = self.validate_page_1
+
     def populate_layers(self):
-        """Populate the list widget with available layers from the QGIS project."""
-        self.listWidget_layers.clear()
+        """Populate the table widget with available layers from the QGIS project."""
+        self.tableWidget_layers.setRowCount(0)
 
         # Get all layers from the current QGIS project
         layers = QgsProject.instance().mapLayers().values()
 
-        # Add each layer to the list widget
+        # Add each layer to the table with a status dropdown
         for layer in layers:
-            self.listWidget_layers.addItem(layer.name())
+            row_position = self.tableWidget_layers.rowCount()
+            self.tableWidget_layers.insertRow(row_position)
 
-    def get_selected_layers(self):
-        """Get the list of selected layer names."""
-        selected_items = self.listWidget_layers.selectedItems()
-        return [item.text() for item in selected_items]
+            # Column 0: Layer name
+            layer_item = QTableWidgetItem(layer.name())
+            self.tableWidget_layers.setItem(row_position, 0, layer_item)
+
+            # Column 1: Status dropdown
+            status_combo = QComboBox()
+            status_combo.addItems([
+                self.STATUS_DO_NOT_INCLUDE,
+                self.STATUS_INCLUDE,
+                self.STATUS_TARGET,
+                self.STATUS_SPATIAL_MARKER
+            ])
+            status_combo.currentTextChanged.connect(self.on_status_changed)
+            self.tableWidget_layers.setCellWidget(row_position, 1, status_combo)
+
+        # Resize columns to fit content
+        self.tableWidget_layers.resizeColumnsToContents()
+
+    def on_status_changed(self, text):
+        """Handle status change to ensure only one layer is set as Target."""
+        if text == self.STATUS_TARGET:
+            # Get the sender combo box
+            sender = self.sender()
+
+            # Find all combo boxes and reset any other "Include as Target" to "Do not include"
+            for row in range(self.tableWidget_layers.rowCount()):
+                combo = self.tableWidget_layers.cellWidget(row, 1)
+                if combo and combo != sender and combo.currentText() == self.STATUS_TARGET:
+                    combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
+
+    def validate_page_1(self):
+        """Validate page 1 before allowing user to proceed."""
+        # Check if assessment name is provided
+        if not self.lineEdit_name.text().strip():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Please enter an assessment name before proceeding."
+            )
+            return False
+
+        # Check if exactly one layer is set as "Include as Target"
+        target_count = 0
+        for row in range(self.tableWidget_layers.rowCount()):
+            combo = self.tableWidget_layers.cellWidget(row, 1)
+            if combo and combo.currentText() == self.STATUS_TARGET:
+                target_count += 1
+
+        if target_count == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Please select exactly one layer as 'Include as Target' before proceeding."
+            )
+            return False
+        elif target_count > 1:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Only one layer can be set as 'Include as Target'. Please check your selections."
+            )
+            return False
+
+        return True
+
+    def get_layer_configurations(self):
+        """Get the configuration for all layers."""
+        configurations = []
+        for row in range(self.tableWidget_layers.rowCount()):
+            layer_name = self.tableWidget_layers.item(row, 0).text()
+            combo = self.tableWidget_layers.cellWidget(row, 1)
+            status = combo.currentText() if combo else self.STATUS_DO_NOT_INCLUDE
+
+            configurations.append({
+                'layer_name': layer_name,
+                'status': status
+            })
+
+        return configurations
 
     def initialize_page_2(self):
         """Initialize the second wizard page."""

@@ -62,18 +62,31 @@
     <item>
      <widget class="QLabel" name="label_layers">
       <property name="text">
-       <string>Select layers to include in the assessment:</string>
+       <string>Configure layer status for the assessment:</string>
       </property>
      </widget>
     </item>
     <item>
-     <widget class="QListWidget" name="listWidget_layers">
-      <property name="selectionMode">
-       <enum>QAbstractItemView::MultiSelection</enum>
-      </property>
+     <widget class="QTableWidget" name="tableWidget_layers">
       <property name="toolTip">
-       <string>Select one or more layers (hold Ctrl/Cmd to select multiple)</string>
+       <string>Set the status for each layer. One layer must be set as "Include as Target"</string>
       </property>
+      <property name="editTriggers">
+       <set>QAbstractItemView::NoEditTriggers</set>
+      </property>
+      <property name="selectionBehavior">
+       <enum>QAbstractItemView::SelectRows</enum>
+      </property>
+      <column>
+       <property name="text">
+        <string>Layer Name</string>
+       </property>
+      </column>
+      <column>
+       <property name="text">
+        <string>Status</string>
+       </property>
+      </column>
      </widget>
     </item>
    </layout>
