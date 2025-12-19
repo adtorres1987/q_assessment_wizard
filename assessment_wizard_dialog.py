@@ -26,12 +26,68 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem
-from qgis.core import QgsProject
+from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QHBoxLayout
+from qgis.PyQt.QtCore import Qt, QSize
+from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry,
+                       QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform)
+from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'assessment_wizard_dialog_base.ui'))
+
+
+class FeatureSelectionTool(QgsMapTool):
+    """Custom map tool for selecting features by clicking."""
+
+    def __init__(self, canvas, layer, selection_callback):
+        """Initialize the feature selection tool.
+
+        Args:
+            canvas: QgsMapCanvas - The map canvas
+            layer: QgsVectorLayer - The layer to select features from
+            selection_callback: callable - Function to call when selection changes
+        """
+        super(FeatureSelectionTool, self).__init__(canvas)
+        self.layer = layer
+        self.selection_callback = selection_callback
+        self.setCursor(Qt.CrossCursor)
+
+    def canvasReleaseEvent(self, event):
+        """Handle mouse click on the map canvas."""
+        # Get the click point in map coordinates
+        point = self.toMapCoordinates(event.pos())
+
+        # Create a point geometry for distance calculation
+        point_geom = QgsGeometry.fromPointXY(QgsPointXY(point))
+
+        # Create a small buffer around the click point for tolerance
+        search_radius = self.canvas().mapUnitsPerPixel() * 5
+
+        # Find features near the click point
+        features = []
+        for feature in self.layer.getFeatures():
+            geom = feature.geometry()
+            if geom.distance(point_geom) <= search_radius:
+                features.append(feature.id())
+
+        if features:
+            # Get current selection
+            selected_ids = set(self.layer.selectedFeatureIds())
+
+            # Toggle selection: if feature is selected, deselect it; otherwise select it
+            clicked_id = features[0]
+            if clicked_id in selected_ids:
+                selected_ids.discard(clicked_id)
+            else:
+                selected_ids.add(clicked_id)
+
+            # Update layer selection
+            self.layer.selectByIds(list(selected_ids))
+
+            # Trigger callback to update UI
+            if self.selection_callback:
+                self.selection_callback()
 
 
 class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
@@ -41,7 +97,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     STATUS_SPATIAL_MARKER = "Spatial Marker"
     STATUS_DO_NOT_INCLUDE = "Do not include"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, iface=None):
         """Constructor."""
         super(QassessmentWizardDialog, self).__init__(parent)
         # Set up the user interface from Designer through FORM_CLASS.
@@ -50,6 +106,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+
+        # Initialize variables
+        self.iface = iface
+        self.target_layer = None
+        self.map_canvas = None
+        self.map_tool_select = None
 
         # Initialize wizard pages
         self.initialize_page_1()
@@ -78,7 +140,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         layers = QgsProject.instance().mapLayers().values()
 
         # Add each layer to the table with a status dropdown
+        # Only include vector layers (raster layers cannot be used as target)
         for layer in layers:
+            # Check if it's a vector layer
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+
             row_position = self.tableWidget_layers.rowCount()
             self.tableWidget_layers.insertRow(row_position)
 
@@ -164,10 +231,278 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
     def initialize_page_2(self):
         """Initialize the second wizard page."""
-        # Add your page 2 initialization logic here
-        pass
+        # Connect page entered signal to setup the map
+        self.currentIdChanged.connect(self.on_page_changed)
+
+        # Connect selection buttons
+        self.pushButton_select_all.clicked.connect(self.select_all_features)
+        self.pushButton_clear_selection.clicked.connect(self.clear_selection)
+
+        # Set up page validation
+        self.page_2.validatePage = self.validate_page_2
+
+    def on_page_changed(self):
+        """Handle page changes to setup page 2 when entered."""
+        if self.currentPage() == self.page_2:
+            self.setup_page_2()
+
+    def setup_page_2(self):
+        """Setup page 2 with the target layer and map canvas."""
+        # Get the target layer from page 1
+        self.target_layer = self.get_target_layer()
+
+        if not self.target_layer:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error",
+                "No target layer found. Please go back and select a target layer."
+            )
+            return
+
+        # Verify it's a vector layer
+        if not isinstance(self.target_layer, QgsVectorLayer):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error",
+                "The target layer must be a vector layer. Raster layers are not supported."
+            )
+            return
+
+        # Update the label with target layer name
+        self.label_target_layer_name.setText(f"Target Layer: {self.target_layer.name()}")
+
+        # Create map canvas if it doesn't exist
+        if not self.map_canvas:
+            self.map_canvas = QgsMapCanvas(self)
+            self.map_canvas.setCanvasColor(Qt.white)
+
+            # Set size for the canvas
+            self.map_canvas.setMinimumSize(400, 400)
+            self.map_canvas.resize(800, 600)
+
+            # Create toolbar for map controls
+            self.map_toolbar = QToolBar()
+            self.map_toolbar.setIconSize(QSize(16, 16))
+
+            # Zoom In button
+            self.zoom_in_button = QPushButton("Zoom In")
+            self.zoom_in_button.clicked.connect(self.zoom_in)
+            self.map_toolbar.addWidget(self.zoom_in_button)
+
+            # Zoom Out button
+            self.zoom_out_button = QPushButton("Zoom Out")
+            self.zoom_out_button.clicked.connect(self.zoom_out)
+            self.map_toolbar.addWidget(self.zoom_out_button)
+
+            # Zoom to Full Extent button
+            self.zoom_full_button = QPushButton("Zoom to Layer")
+            self.zoom_full_button.clicked.connect(self.zoom_to_layer)
+            self.map_toolbar.addWidget(self.zoom_full_button)
+
+            # Pan button
+            self.pan_button = QPushButton("Pan")
+            self.pan_button.setCheckable(True)
+            self.pan_button.clicked.connect(self.toggle_pan)
+            self.map_toolbar.addWidget(self.pan_button)
+
+            # Add toolbar and canvas to the container
+            self.verticalLayout_map.addWidget(self.map_toolbar)
+            self.verticalLayout_map.addWidget(self.map_canvas)
+
+            # Copy settings from main QGIS canvas if available
+            if self.iface:
+                main_canvas = self.iface.mapCanvas()
+                self.map_canvas.setDestinationCrs(main_canvas.mapSettings().destinationCrs())
+
+        # Create OpenStreetMap base layer
+        osm_layer = self.create_osm_layer()
+
+        # Set layers for the map canvas (OSM as base, target layer on top)
+        layers_to_display = []
+        if osm_layer and osm_layer.isValid():
+            layers_to_display.append(self.target_layer)
+            layers_to_display.append(osm_layer)
+            # Set CRS to Web Mercator for OSM
+            self.map_canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        else:
+            layers_to_display.append(self.target_layer)
+            # Use the layer's CRS if no OSM
+            self.map_canvas.setDestinationCrs(self.target_layer.crs())
+
+        # Set the layers
+        self.map_canvas.setLayers(layers_to_display)
+
+        # Zoom to layer extent
+        extent = self.target_layer.extent()
+        if extent.isNull() or extent.isEmpty():
+            # If extent is invalid, try to get from main canvas
+            if self.iface:
+                extent = self.iface.mapCanvas().extent()
+
+        if not extent.isNull() and not extent.isEmpty():
+            # Transform extent to map CRS if needed
+            if self.target_layer.crs() != self.map_canvas.mapSettings().destinationCrs():
+                transform = QgsCoordinateTransform(
+                    self.target_layer.crs(),
+                    self.map_canvas.mapSettings().destinationCrs(),
+                    QgsProject.instance()
+                )
+                extent = transform.transformBoundingBox(extent)
+
+            extent.scale(1.1)  # Add 10% buffer
+            self.map_canvas.setExtent(extent)
+
+        # Enable rendering
+        self.map_canvas.setRenderFlag(True)
+
+        # Force refresh
+        self.map_canvas.refresh()
+        self.map_canvas.repaint()
+
+        # Process events
+        QtWidgets.QApplication.processEvents()
+
+        # Additional refresh after a moment
+        QtWidgets.QApplication.processEvents()
+
+        # Create and set the custom selection tool
+        self.map_tool_select = FeatureSelectionTool(
+            self.map_canvas,
+            self.target_layer,
+            self.update_selection_count
+        )
+        self.map_canvas.setMapTool(self.map_tool_select)
+
+        # Connect to layer selection changed signal
+        if self.target_layer:
+            try:
+                self.target_layer.selectionChanged.disconnect(self.update_selection_count)
+            except:
+                pass
+            self.target_layer.selectionChanged.connect(self.update_selection_count)
+
+        # Update selection count
+        self.update_selection_count()
+
+    def create_osm_layer(self):
+        """Create an OpenStreetMap base layer.
+
+        Returns:
+            QgsRasterLayer: The OSM layer, or None if creation failed
+        """
+        # OpenStreetMap tile service URL
+        osm_url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0"
+
+        # Create the raster layer
+        osm_layer = QgsRasterLayer(osm_url, "OpenStreetMap", "wms")
+
+        # Check if the layer is valid
+        if osm_layer.isValid():
+            return osm_layer
+        else:
+            return None
+
+    def get_target_layer(self):
+        """Get the layer marked as 'Include as Target' from page 1."""
+        for row in range(self.tableWidget_layers.rowCount()):
+            combo = self.tableWidget_layers.cellWidget(row, 1)
+            if combo and combo.currentText() == self.STATUS_TARGET:
+                layer_name = self.tableWidget_layers.item(row, 0).text()
+                # Find the layer in the project
+                layers = QgsProject.instance().mapLayersByName(layer_name)
+                if layers:
+                    return layers[0]
+        return None
+
+    def select_all_features(self):
+        """Select all features in the target layer."""
+        if self.target_layer:
+            self.target_layer.selectAll()
+            self.update_selection_count()
+
+    def clear_selection(self):
+        """Clear all selected features in the target layer."""
+        if self.target_layer:
+            self.target_layer.removeSelection()
+            self.update_selection_count()
+
+    def update_selection_count(self):
+        """Update the label showing the number of selected features."""
+        if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
+            count = self.target_layer.selectedFeatureCount()
+            self.label_selection_count.setText(f"Selected: {count} features")
+            if self.map_canvas:
+                self.map_canvas.refresh()
+
+    def validate_page_2(self):
+        """Validate page 2 before allowing user to proceed."""
+        if not self.target_layer:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation Error",
+                "No target layer is available."
+            )
+            return False
+
+        # Check if at least one feature is selected
+        if self.target_layer.selectedFeatureCount() == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Please select at least one feature before proceeding."
+            )
+            return False
+
+        return True
+
+    def get_selected_features(self):
+        """Get the list of selected feature IDs."""
+        if self.target_layer:
+            return list(self.target_layer.selectedFeatureIds())
+        return []
 
     def initialize_page_3(self):
         """Initialize the third wizard page."""
         # Add your page 3 initialization logic here
         pass
+
+    def zoom_in(self):
+        """Zoom in on the map canvas."""
+        if self.map_canvas:
+            self.map_canvas.zoomIn()
+
+    def zoom_out(self):
+        """Zoom out on the map canvas."""
+        if self.map_canvas:
+            self.map_canvas.zoomOut()
+
+    def zoom_to_layer(self):
+        """Zoom to the extent of the target layer."""
+        if self.map_canvas and self.target_layer:
+            extent = self.target_layer.extent()
+            if not extent.isNull() and not extent.isEmpty():
+                # Transform extent to map CRS if needed
+                if self.target_layer.crs() != self.map_canvas.mapSettings().destinationCrs():
+                    transform = QgsCoordinateTransform(
+                        self.target_layer.crs(),
+                        self.map_canvas.mapSettings().destinationCrs(),
+                        QgsProject.instance()
+                    )
+                    extent = transform.transformBoundingBox(extent)
+
+                extent.scale(1.1)  # Add 10% buffer
+                self.map_canvas.setExtent(extent)
+                self.map_canvas.refresh()
+
+    def toggle_pan(self):
+        """Toggle pan mode for the map canvas."""
+        if self.map_canvas:
+            if self.pan_button.isChecked():
+                # Create pan tool if it doesn't exist
+                if not hasattr(self, 'pan_tool'):
+                    self.pan_tool = QgsMapToolPan(self.map_canvas)
+                self.map_canvas.setMapTool(self.pan_tool)
+            else:
+                # Switch back to selection tool
+                if self.map_tool_select:
+                    self.map_canvas.setMapTool(self.map_tool_select)

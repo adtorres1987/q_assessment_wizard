@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>600</width>
-    <height>500</height>
+    <width>1000</width>
+    <height>700</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -93,35 +93,100 @@
   </widget>
   <widget class="QWizardPage" name="page_2">
    <property name="title">
-    <string>Page 2 - Data Selection</string>
+    <string>Page 2 - Feature Selection</string>
    </property>
    <property name="subTitle">
-    <string>Select the data layers and parameters</string>
+    <string>Select features from the target layer</string>
    </property>
    <layout class="QVBoxLayout" name="verticalLayout_page2">
     <item>
-     <widget class="QLabel" name="label_page2_info">
+     <widget class="QLabel" name="label_target_layer_name">
       <property name="text">
-       <string>This is the second page of the wizard. Add your controls here.</string>
+       <string>Target Layer: </string>
       </property>
-      <property name="wordWrap">
-       <bool>true</bool>
+      <property name="styleSheet">
+       <string>QLabel { font-weight: bold; }</string>
       </property>
      </widget>
     </item>
     <item>
-     <spacer name="verticalSpacer_page2">
-      <property name="orientation">
-       <enum>Qt::Vertical</enum>
-      </property>
-      <property name="sizeHint" stdset="0">
+     <layout class="QHBoxLayout" name="horizontalLayout_buttons">
+      <item>
+       <widget class="QPushButton" name="pushButton_select_all">
+        <property name="text">
+         <string>Select All Features</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="pushButton_clear_selection">
+        <property name="text">
+         <string>Clear Selection</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer name="horizontalSpacer_buttons">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QLabel" name="label_selection_count">
+        <property name="text">
+         <string>Selected: 0 features</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QWidget" name="map_canvas_container" native="true">
+      <property name="minimumSize">
        <size>
-        <width>20</width>
-        <height>40</height>
+        <width>0</width>
+        <height>400</height>
        </size>
       </property>
-     </spacer>
+      <layout class="QVBoxLayout" name="verticalLayout_map">
+       <property name="spacing">
+        <number>0</number>
+       </property>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+      </layout>
+     </widget>
     </item>
+    <!-- <item>
+     <widget class="QLabel" name="label_page2_instructions">
+      <property name="text">
+       <string>Click on features in the map to select them, or use the buttons above. At least one feature must be selected to proceed.</string>
+      </property>
+      <property name="wordWrap">
+       <bool>true</bool>
+      </property>
+      <property name="styleSheet">
+       <string>QLabel { color: gray; font-size: 9pt; }</string>
+      </property>
+     </widget>
+    </item> -->
    </layout>
   </widget>
   <widget class="QWizardPage" name="page_3">
