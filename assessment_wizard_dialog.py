@@ -28,9 +28,11 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QHBoxLayout
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry,
+from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsWkbTypes, QgsRectangle,
                        QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform)
-from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan
+from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
+from PyQt5.QtGui import QColor
+
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -88,6 +90,138 @@ class FeatureSelectionTool(QgsMapTool):
             # Trigger callback to update UI
             if self.selection_callback:
                 self.selection_callback()
+
+
+class RectangleSelectTool(QgsMapTool):
+    """Custom map tool for selecting features with a rectangle."""
+
+    def __init__(self, canvas, target_layer=None, selection_callback=None):
+        """Initialize the rectangle selection tool.
+
+        Args:
+            canvas: QgsMapCanvas - The map canvas
+            target_layer: QgsVectorLayer - The layer to select features from (optional)
+            selection_callback: callable - Function to call when selection changes
+        """
+        super(RectangleSelectTool, self).__init__(canvas)
+        self.canvas = canvas
+        self.target_layer = target_layer
+        self.selection_callback = selection_callback
+        self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        self.rubber_band.setColor(QColor(255, 0, 0, 100))  # Semi-transparent red
+        self.rubber_band.setWidth(2)
+        self.start_point = None
+        self.end_point = None
+        self.setCursor(Qt.CrossCursor)
+
+    def canvasPressEvent(self, event):
+        """Handle mouse press event."""
+        if event.button() == Qt.LeftButton:
+            self.start_point = self.toMapCoordinates(event.pos())
+            self.end_point = self.start_point
+            self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+
+    def canvasMoveEvent(self, event):
+        """Handle mouse move event to update rubber band."""
+        if self.start_point is None:
+            return
+        self.end_point = self.toMapCoordinates(event.pos())
+        self.update_rubber_band()
+
+    def canvasReleaseEvent(self, event):
+        """Handle mouse release event to select features."""
+        if event.button() != Qt.LeftButton or self.start_point is None:
+            return
+
+        self.end_point = self.toMapCoordinates(event.pos())
+        self.update_rubber_band()
+
+        # Create rectangle from start and end points
+        rect = QgsRectangle(self.start_point, self.end_point)
+
+        if not rect.isEmpty():
+            from qgis.core import QgsFeatureRequest
+
+            additive = event.modifiers() & Qt.ShiftModifier  # Hold Shift to add to selection
+
+            # Use target layer if specified, otherwise use all visible vector layers
+            if self.target_layer:
+                layers = [self.target_layer]
+            else:
+                layers = [layer for layer in self.canvas.layers()
+                         if isinstance(layer, QgsVectorLayer)]
+
+            for layer in layers:
+                if not layer or not isinstance(layer, QgsVectorLayer):
+                    continue
+
+                # Clear previous selection if not additive
+                if not additive:
+                    layer.removeSelection()
+
+                # Transform rectangle to layer CRS if needed
+                layer_rect = rect
+                if self.canvas.mapSettings().destinationCrs() != layer.crs():
+                    transform = QgsCoordinateTransform(
+                        self.canvas.mapSettings().destinationCrs(),
+                        layer.crs(),
+                        QgsProject.instance()
+                    )
+                    layer_rect = transform.transformBoundingBox(rect)
+
+                # Create feature request with rectangle filter in layer CRS
+                request = QgsFeatureRequest()
+                request.setFilterRect(layer_rect)
+
+                # Get feature IDs that intersect with the rectangle
+                rect_geom = QgsGeometry.fromRect(layer_rect)
+                feature_ids = []
+
+                for feature in layer.getFeatures(request):
+                    if feature.geometry() and feature.geometry().intersects(rect_geom):
+                        feature_ids.append(feature.id())
+
+                # Select features
+                if additive:
+                    # Add to existing selection
+                    existing_ids = set(layer.selectedFeatureIds())
+                    existing_ids.update(feature_ids)
+                    layer.selectByIds(list(existing_ids))
+                else:
+                    # Replace selection
+                    layer.selectByIds(feature_ids)
+
+        # Reset tool
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        self.start_point = None
+        self.end_point = None
+
+        # Refresh canvas to show selection
+        self.canvas.refresh()
+
+        # Trigger callback to update UI after refresh
+        if self.selection_callback:
+            self.selection_callback()
+
+    def update_rubber_band(self):
+        """Update the rubber band rectangle visualization."""
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        if self.start_point and self.end_point:
+            # Create rectangle points
+            points = [
+                self.start_point,
+                QgsPointXY(self.start_point.x(), self.end_point.y()),
+                self.end_point,
+                QgsPointXY(self.end_point.x(), self.start_point.y())
+            ]
+            for i, point in enumerate(points):
+                self.rubber_band.addPoint(point, True if i == len(points) - 1 else False)
+            self.rubber_band.show()
+
+    def deactivate(self):
+        """Clean up when tool is deactivated."""
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        super(RectangleSelectTool, self).deactivate()
 
 
 class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
@@ -306,6 +440,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.pan_button.setCheckable(True)
             self.pan_button.clicked.connect(self.toggle_pan)
             self.map_toolbar.addWidget(self.pan_button)
+
+            # Rectangle Select button
+            self.rect_select_button = QPushButton("Rectangle Select")
+            self.rect_select_button.setCheckable(True)
+            self.rect_select_button.clicked.connect(self.toggle_rectangle_select)
+            self.map_toolbar.addWidget(self.rect_select_button)
 
             # Add toolbar and canvas to the container
             self.verticalLayout_map.addWidget(self.map_toolbar)
@@ -552,11 +692,35 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Toggle pan mode for the map canvas."""
         if self.map_canvas:
             if self.pan_button.isChecked():
+                # Uncheck rectangle select if it's checked
+                if hasattr(self, 'rect_select_button') and self.rect_select_button.isChecked():
+                    self.rect_select_button.setChecked(False)
+
                 # Create pan tool if it doesn't exist
                 if not hasattr(self, 'pan_tool'):
                     self.pan_tool = QgsMapToolPan(self.map_canvas)
                 self.map_canvas.setMapTool(self.pan_tool)
             else:
                 # Switch back to selection tool
+                if self.map_tool_select:
+                    self.map_canvas.setMapTool(self.map_tool_select)
+
+    def toggle_rectangle_select(self):
+        """Toggle rectangle selection mode for the map canvas."""
+        if self.map_canvas:
+            if self.rect_select_button.isChecked():
+                # Uncheck pan if it's checked
+                if hasattr(self, 'pan_button') and self.pan_button.isChecked():
+                    self.pan_button.setChecked(False)
+
+                # Always recreate the rectangle select tool to ensure it has the current target layer
+                self.rect_select_tool = RectangleSelectTool(
+                    self.map_canvas,
+                    self.target_layer,
+                    self.update_selection_count
+                )
+                self.map_canvas.setMapTool(self.rect_select_tool)
+            else:
+                # Switch back to point selection tool
                 if self.map_tool_select:
                     self.map_canvas.setMapTool(self.map_tool_select)
