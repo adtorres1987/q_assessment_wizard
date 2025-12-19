@@ -242,9 +242,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.page_2.validatePage = self.validate_page_2
 
     def on_page_changed(self):
-        """Handle page changes to setup page 2 when entered."""
+        """Handle page changes to setup page 2 and page 3 when entered."""
         if self.currentPage() == self.page_2:
             self.setup_page_2()
+        elif self.currentPage() == self.page_3:
+            self.setup_page_3()
 
     def setup_page_2(self):
         """Setup page 2 with the target layer and map canvas."""
@@ -463,8 +465,60 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
     def initialize_page_3(self):
         """Initialize the third wizard page."""
-        # Add your page 3 initialization logic here
-        pass
+        # Set up the summary table headers
+        self.tableWidget_summary_layers.setColumnCount(2)
+        self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Status"])
+        self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
+
+    def setup_page_3(self):
+        """Populate page 3 with summary information."""
+        # Get assessment name and description from page 1
+        assessment_name = self.lineEdit_name.text().strip()
+        assessment_description = self.textEdit_description.toPlainText().strip()
+
+        # Update the summary labels
+        self.label_summary_name.setText(assessment_name)
+        self.label_summary_description.setText(assessment_description if assessment_description else "No description provided")
+
+        # Get selected feature count from target layer
+        if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
+            feature_count = self.target_layer.selectedFeatureCount()
+            self.label_summary_features.setText(f"{feature_count} features selected")
+        else:
+            self.label_summary_features.setText("0 features selected")
+
+        # Populate the layers table with all included layers
+        self.tableWidget_summary_layers.setRowCount(0)
+
+        row = 0
+        for table_row in range(self.tableWidget_layers.rowCount()):
+            layer_name_item = self.tableWidget_layers.item(table_row, 0)
+            status_combo = self.tableWidget_layers.cellWidget(table_row, 1)
+
+            if layer_name_item and status_combo:
+                status = status_combo.currentText()
+
+                # Only include layers that are not "Do not include"
+                if status != self.STATUS_DO_NOT_INCLUDE:
+                    self.tableWidget_summary_layers.insertRow(row)
+
+                    # Add layer name
+                    name_item = QTableWidgetItem(layer_name_item.text())
+                    self.tableWidget_summary_layers.setItem(row, 0, name_item)
+
+                    # Add status
+                    status_item = QTableWidgetItem(status)
+                    self.tableWidget_summary_layers.setItem(row, 1, status_item)
+
+                    # Highlight the target layer
+                    if status == self.STATUS_TARGET:
+                        name_item.setBackground(Qt.gray)
+                        status_item.setBackground(Qt.gray)
+
+                    row += 1
+
+        # Resize columns to content
+        self.tableWidget_summary_layers.resizeColumnsToContents()
 
     def zoom_in(self):
         """Zoom in on the map canvas."""

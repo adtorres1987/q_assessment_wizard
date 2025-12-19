@@ -191,20 +191,112 @@
   </widget>
   <widget class="QWizardPage" name="page_3">
    <property name="title">
-    <string>Page 3 - Processing and Results</string>
+    <string>Page 3 - Summary</string>
    </property>
    <property name="subTitle">
-    <string>Review settings and execute the assessment</string>
+    <string>Review your assessment configuration</string>
    </property>
    <layout class="QVBoxLayout" name="verticalLayout_page3">
     <item>
-     <widget class="QLabel" name="label_page3_info">
+     <widget class="QLabel" name="label_summary_header">
       <property name="text">
-       <string>This is the third page of the wizard. Add your controls here.</string>
+       <string>&lt;h3&gt;Assessment Summary&lt;/h3&gt;</string>
       </property>
-      <property name="wordWrap">
-       <bool>true</bool>
+     </widget>
+    </item>
+    <item>
+     <widget class="QGroupBox" name="groupBox_basic_info">
+      <property name="title">
+       <string>Basic Information</string>
       </property>
+      <layout class="QFormLayout" name="formLayout_summary">
+       <item row="0" column="0">
+        <widget class="QLabel" name="label_summary_name_label">
+         <property name="text">
+          <string>Assessment Name:</string>
+         </property>
+         <property name="styleSheet">
+          <string>font-weight: bold;</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <widget class="QLabel" name="label_summary_name">
+         <property name="text">
+          <string/>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="0">
+        <widget class="QLabel" name="label_summary_description_label">
+         <property name="text">
+          <string>Description:</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+         </property>
+         <property name="styleSheet">
+          <string>font-weight: bold;</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1">
+        <widget class="QLabel" name="label_summary_description">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="0">
+        <widget class="QLabel" name="label_summary_features_label">
+         <property name="text">
+          <string>Selected Features:</string>
+         </property>
+         <property name="styleSheet">
+          <string>font-weight: bold;</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="1">
+        <widget class="QLabel" name="label_summary_features">
+         <property name="text">
+          <string/>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <widget class="QGroupBox" name="groupBox_layers">
+      <property name="title">
+       <string>Included Layers</string>
+      </property>
+      <layout class="QVBoxLayout" name="verticalLayout_layers_summary">
+       <item>
+        <widget class="QTableWidget" name="tableWidget_summary_layers">
+         <property name="editTriggers">
+          <set>QAbstractItemView::NoEditTriggers</set>
+         </property>
+         <property name="selectionMode">
+          <enum>QAbstractItemView::NoSelection</enum>
+         </property>
+         <column>
+          <property name="text">
+           <string>Layer Name</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Status</string>
+          </property>
+         </column>
+        </widget>
+       </item>
+      </layout>
      </widget>
     </item>
     <item>
