@@ -56,29 +56,66 @@ class FeatureSelectionTool(QgsMapTool):
         self.setCursor(Qt.CrossCursor)
 
     def canvasReleaseEvent(self, event):
-        """Handle mouse click on the map canvas."""
+        """Handle mouse click on the map canvas with CRS transformation."""
+        from qgis.core import QgsFeatureRequest
+
         # Get the click point in map coordinates
         point = self.toMapCoordinates(event.pos())
 
-        # Create a point geometry for distance calculation
-        point_geom = QgsGeometry.fromPointXY(QgsPointXY(point))
-
-        # Create a small buffer around the click point for tolerance
+        # Calculate search tolerance based on map scale (5 pixels)
         search_radius = self.canvas().mapUnitsPerPixel() * 5
 
-        # Find features near the click point
-        features = []
-        for feature in self.layer.getFeatures():
-            geom = feature.geometry()
-            if geom.distance(point_geom) <= search_radius:
-                features.append(feature.id())
+        # Transform point to layer CRS if needed
+        layer_point = point
+        layer_search_radius = search_radius
 
-        if features:
+        if self.canvas().mapSettings().destinationCrs() != self.layer.crs():
+            transform = QgsCoordinateTransform(
+                self.canvas().mapSettings().destinationCrs(),
+                self.layer.crs(),
+                QgsProject.instance()
+            )
+            layer_point = transform.transform(point)
+
+            # Transform the search radius (approximate)
+            # Create a small rectangle and transform it to get the transformed radius
+            test_point = QgsPointXY(point.x() + search_radius, point.y())
+            transformed_test = transform.transform(test_point)
+            layer_search_radius = layer_point.distance(transformed_test)
+
+        # Create a point geometry for distance calculation in layer CRS
+        point_geom = QgsGeometry.fromPointXY(QgsPointXY(layer_point))
+
+        # Create search rectangle for efficient spatial filtering
+        search_rect = QgsRectangle(
+            layer_point.x() - layer_search_radius,
+            layer_point.y() - layer_search_radius,
+            layer_point.x() + layer_search_radius,
+            layer_point.y() + layer_search_radius
+        )
+
+        # Use spatial filter for efficient querying
+        request = QgsFeatureRequest()
+        request.setFilterRect(search_rect)
+
+        # Find features and calculate distances in layer CRS
+        candidates = []
+        for feature in self.layer.getFeatures(request):
+            geom = feature.geometry()
+            if geom and not geom.isNull():
+                distance = geom.distance(point_geom)
+                if distance <= layer_search_radius:
+                    candidates.append((feature.id(), distance))
+
+        # Sort by distance to get the closest feature
+        candidates.sort(key=lambda x: x[1])
+
+        if candidates:
             # Get current selection
             selected_ids = set(self.layer.selectedFeatureIds())
 
-            # Toggle selection: if feature is selected, deselect it; otherwise select it
-            clicked_id = features[0]
+            # Toggle selection for the closest feature
+            clicked_id = candidates[0][0]
             if clicked_id in selected_ids:
                 selected_ids.discard(clicked_id)
             else:
@@ -86,6 +123,9 @@ class FeatureSelectionTool(QgsMapTool):
 
             # Update layer selection
             self.layer.selectByIds(list(selected_ids))
+
+            # Refresh canvas to show selection
+            self.canvas().refresh()
 
             # Trigger callback to update UI
             if self.selection_callback:
