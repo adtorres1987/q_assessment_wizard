@@ -169,7 +169,7 @@ class RectangleSelectTool(QgsMapTool):
         self.update_rubber_band()
 
     def canvasReleaseEvent(self, event):
-        """Handle mouse release event to select features."""
+        """Handle mouse release event to select features (rectangle or point)."""
         if event.button() != Qt.LeftButton or self.start_point is None:
             return
 
@@ -179,26 +179,84 @@ class RectangleSelectTool(QgsMapTool):
         # Create rectangle from start and end points
         rect = QgsRectangle(self.start_point, self.end_point)
 
-        if not rect.isEmpty():
-            from qgis.core import QgsFeatureRequest
+        # Check if this is a single click (point selection) or a rectangle drag
+        is_single_click = rect.isEmpty() or (
+            abs(self.start_point.x() - self.end_point.x()) < self.canvas.mapUnitsPerPixel() * 3 and
+            abs(self.start_point.y() - self.end_point.y()) < self.canvas.mapUnitsPerPixel() * 3
+        )
 
-            additive = event.modifiers() & Qt.ShiftModifier  # Hold Shift to add to selection
+        from qgis.core import QgsFeatureRequest
 
-            # Use target layer if specified, otherwise use all visible vector layers
-            if self.target_layer:
-                layers = [self.target_layer]
+        additive = event.modifiers() & Qt.ShiftModifier  # Hold Shift to add to selection
+
+        # Use target layer if specified, otherwise use all visible vector layers
+        if self.target_layer:
+            layers = [self.target_layer]
+        else:
+            layers = [layer for layer in self.canvas.layers()
+                     if isinstance(layer, QgsVectorLayer)]
+
+        for layer in layers:
+            if not layer or not isinstance(layer, QgsVectorLayer):
+                continue
+
+            if is_single_click:
+                # Handle point selection
+                point = self.end_point
+                search_radius = self.canvas.mapUnitsPerPixel() * 5
+
+                # Transform point to layer CRS if needed
+                layer_point = point
+                layer_search_radius = search_radius
+
+                if self.canvas.mapSettings().destinationCrs() != layer.crs():
+                    transform = QgsCoordinateTransform(
+                        self.canvas.mapSettings().destinationCrs(),
+                        layer.crs(),
+                        QgsProject.instance()
+                    )
+                    layer_point = transform.transform(point)
+                    test_point = QgsPointXY(point.x() + search_radius, point.y())
+                    transformed_test = transform.transform(test_point)
+                    layer_search_radius = layer_point.distance(transformed_test)
+
+                # Create search rectangle for point selection
+                point_geom = QgsGeometry.fromPointXY(QgsPointXY(layer_point))
+                search_rect = QgsRectangle(
+                    layer_point.x() - layer_search_radius,
+                    layer_point.y() - layer_search_radius,
+                    layer_point.x() + layer_search_radius,
+                    layer_point.y() + layer_search_radius
+                )
+
+                # Find closest feature
+                request = QgsFeatureRequest()
+                request.setFilterRect(search_rect)
+
+                candidates = []
+                for feature in layer.getFeatures(request):
+                    geom = feature.geometry()
+                    if geom and not geom.isNull():
+                        distance = geom.distance(point_geom)
+                        if distance <= layer_search_radius:
+                            candidates.append((feature.id(), distance))
+
+                candidates.sort(key=lambda x: x[1])
+
+                if candidates:
+                    # Always add to selection for point clicks (additive behavior)
+                    existing_ids = set(layer.selectedFeatureIds())
+                    clicked_id = candidates[0][0]
+
+                    # Toggle: if already selected, remove it; otherwise add it
+                    if clicked_id in existing_ids:
+                        existing_ids.discard(clicked_id)
+                    else:
+                        existing_ids.add(clicked_id)
+
+                    layer.selectByIds(list(existing_ids))
             else:
-                layers = [layer for layer in self.canvas.layers()
-                         if isinstance(layer, QgsVectorLayer)]
-
-            for layer in layers:
-                if not layer or not isinstance(layer, QgsVectorLayer):
-                    continue
-
-                # Clear previous selection if not additive
-                if not additive:
-                    layer.removeSelection()
-
+                # Handle rectangle selection
                 # Transform rectangle to layer CRS if needed
                 layer_rect = rect
                 if self.canvas.mapSettings().destinationCrs() != layer.crs():
@@ -215,21 +273,23 @@ class RectangleSelectTool(QgsMapTool):
 
                 # Get feature IDs that intersect with the rectangle
                 rect_geom = QgsGeometry.fromRect(layer_rect)
-                feature_ids = []
+                new_feature_ids = []
 
                 for feature in layer.getFeatures(request):
                     if feature.geometry() and feature.geometry().intersects(rect_geom):
-                        feature_ids.append(feature.id())
+                        new_feature_ids.append(feature.id())
 
-                # Select features
-                if additive:
-                    # Add to existing selection
-                    existing_ids = set(layer.selectedFeatureIds())
-                    existing_ids.update(feature_ids)
-                    layer.selectByIds(list(existing_ids))
-                else:
-                    # Replace selection
-                    layer.selectByIds(feature_ids)
+                # Get existing selection
+                existing_ids = set(layer.selectedFeatureIds())
+
+                # Combine existing and new selections
+                # Only add features that are not already selected
+                for fid in new_feature_ids:
+                    if fid not in existing_ids:
+                        existing_ids.add(fid)
+
+                # Update selection with combined set
+                layer.selectByIds(list(existing_ids))
 
         # Reset tool
         self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
@@ -699,6 +759,18 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Resize columns to content
         self.tableWidget_summary_layers.resizeColumnsToContents()
+
+        # Populate feature IDs text area
+        if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
+            selected_ids = self.target_layer.selectedFeatureIds()
+            if selected_ids:
+                # Format IDs as comma-separated list
+                ids_text = ", ".join(str(fid) for fid in sorted(selected_ids))
+                self.textEdit_feature_ids.setText(ids_text)
+            else:
+                self.textEdit_feature_ids.setText("No features selected")
+        else:
+            self.textEdit_feature_ids.setText("No target layer available")
 
     def zoom_in(self):
         """Zoom in on the map canvas."""
