@@ -279,17 +279,16 @@ class RectangleSelectTool(QgsMapTool):
                     if feature.geometry() and feature.geometry().intersects(rect_geom):
                         new_feature_ids.append(feature.id())
 
-                # Get existing selection
-                existing_ids = set(layer.selectedFeatureIds())
-
-                # Combine existing and new selections
-                # Only add features that are not already selected
-                for fid in new_feature_ids:
-                    if fid not in existing_ids:
-                        existing_ids.add(fid)
-
-                # Update selection with combined set
-                layer.selectByIds(list(existing_ids))
+                if additive:
+                    # Shift pressed: Add to existing selection
+                    existing_ids = set(layer.selectedFeatureIds())
+                    for fid in new_feature_ids:
+                        if fid not in existing_ids:
+                            existing_ids.add(fid)
+                    layer.selectByIds(list(existing_ids))
+                else:
+                    # Shift not pressed: Replace selection
+                    layer.selectByIds(new_feature_ids)
 
         # Reset tool
         self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
