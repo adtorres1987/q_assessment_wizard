@@ -300,23 +300,17 @@
      </widget>
     </item>
     <item>
-     <widget class="QGroupBox" name="groupBox_feature_ids">
+     <widget class="QGroupBox" name="groupBox_selected_features_map">
       <property name="title">
-       <string>Selected Feature IDs</string>
+       <string>Selected Features Map</string>
       </property>
-      <layout class="QVBoxLayout" name="verticalLayout_feature_ids">
+      <layout class="QVBoxLayout" name="verticalLayout_selected_map">
        <item>
-        <widget class="QTextEdit" name="textEdit_feature_ids">
-         <property name="readOnly">
-          <bool>true</bool>
-         </property>
-         <property name="placeholderText">
-          <string>Feature IDs will be displayed here...</string>
-         </property>
+        <widget class="QWidget" name="widget_map_container_page3" native="true">
          <property name="minimumSize">
           <size>
            <width>0</width>
-           <height>100</height>
+           <height>400</height>
           </size>
          </property>
         </widget>
