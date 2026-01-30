@@ -404,6 +404,42 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.initialize_page_2()
         self.initialize_page_3()
 
+    def reject(self):
+        """Override reject to clean up when user cancels the wizard."""
+        self.cleanup_wizard_data()
+        super(QassessmentWizardDialog, self).reject()
+
+    def cleanup_wizard_data(self):
+        """Clean up all data when wizard is cancelled or finished."""
+        # Remove the selected features layer from project if it exists
+        try:
+            if self.selected_features_layer:
+                QgsProject.instance().removeMapLayer(self.selected_features_layer.id())
+                self.selected_features_layer = None
+        except (RuntimeError, AttributeError):
+            # Layer was already deleted or doesn't exist
+            pass
+
+        # Clear selection on target layer
+        if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
+            try:
+                self.target_layer.removeSelection()
+            except (RuntimeError, AttributeError):
+                pass
+
+        # Clear page 1 inputs
+        self.lineEdit_name.clear()
+        self.textEdit_description.clear()
+
+        # Reset all layer status combos to "Do not include"
+        for row in range(self.tableWidget_layers.rowCount()):
+            combo = self.tableWidget_layers.cellWidget(row, 1)
+            if combo:
+                combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
+
+        # Reset internal references
+        self.target_layer = None
+
     def initialize_page_1(self):
         """Initialize the first wizard page."""
         # Page 1 contains name and description fields
@@ -663,41 +699,35 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.verticalLayout_map.addWidget(self.map_toolbar)
             self.verticalLayout_map.addWidget(self.map_canvas)
 
+            # Set map CRS to EPSG:3857 (Web Mercator for OSM)
+            canvas_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+            self.map_canvas.setDestinationCrs(canvas_crs)
+
             # Show the widgets explicitly
             self.map_toolbar.show()
             self.map_canvas.show()
             self.map_canvas_container.show()
 
-            # Copy settings from main QGIS canvas if available
-            if self.iface:
-                main_canvas = self.iface.mapCanvas()
-                self.map_canvas.setDestinationCrs(main_canvas.mapSettings().destinationCrs())
-
-        # Always update the map layers when entering page 2
+        # Setup map with target layer and OpenStreetMap
         # Create OpenStreetMap base layer
         osm_layer = self.create_osm_layer()
 
-        # Set CRS to Web Mercator for OSM compatibility
+        # Set CRS to Web Mercator (EPSG:3857) for OSM compatibility
         self.map_canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
 
-        # Set the layers - OSM as base, target layer on top
+        # Set layers - target layer on top, OSM as base
         layers_to_display = [self.target_layer]
         if osm_layer and osm_layer.isValid():
             layers_to_display.append(osm_layer)
 
-        # Clear existing layers and set new ones
+        # Clear existing layers and set new ones (same as page 3)
         self.map_canvas.setLayers([])
         self.map_canvas.setLayers(layers_to_display)
 
-        # Zoom to layer extent
+        # Get target layer extent and transform to EPSG:3857 if needed
         extent = self.target_layer.extent()
-        if extent.isNull() or extent.isEmpty():
-            # If extent is invalid, try to get from main canvas
-            if self.iface:
-                extent = self.iface.mapCanvas().extent()
-
         if not extent.isNull() and not extent.isEmpty():
-            # Transform extent to map CRS if needed
+            # Transform extent to map CRS (EPSG:3857) if layer uses different CRS
             if self.target_layer.crs() != self.map_canvas.mapSettings().destinationCrs():
                 transform = QgsCoordinateTransform(
                     self.target_layer.crs(),
@@ -708,6 +738,13 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
             extent.scale(1.1)  # Add 10% buffer
             self.map_canvas.setExtent(extent)
+        else:
+            # Fallback to world extent in EPSG:3857
+            extent = QgsRectangle(-20037508, -20037508, 20037508, 20037508)
+            self.map_canvas.setExtent(extent)
+
+        # Set white background
+        self.map_canvas.setCanvasColor(Qt.white)
 
         # Enable rendering
         self.map_canvas.setRenderFlag(True)
@@ -716,15 +753,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.map_canvas.show()
         self.map_canvas_container.show()
 
-        # Force refresh with multiple methods
+        # Force refresh
         self.map_canvas.refresh()
         QtWidgets.QApplication.processEvents()
         self.map_canvas.repaint()
-        QtWidgets.QApplication.processEvents()
 
-        # Additional refresh to ensure OSM tiles load
-        self.map_canvas.refreshAllLayers()
-        QtWidgets.QApplication.processEvents()
 
         # Create and set the custom selection tool
         self.map_tool_select = FeatureSelectionTool(
@@ -752,13 +785,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def create_osm_layer(self):
         """Create an OpenStreetMap base layer.
 
+        Note: This method is currently not used because OSM tiles don't render
+        properly in custom QgsMapCanvas widgets outside the main QGIS window.
+        This is a known limitation of QGIS when using secondary canvas widgets.
+
+        Kept here for future reference or alternative implementations.
+
         Returns:
             QgsRasterLayer: The OSM layer, or None if creation failed
         """
-        # OpenStreetMap tile service URL
-        osm_url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0"
+        # OpenStreetMap XYZ tile service URL
+        osm_url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0&crs=EPSG:3857"
 
-        # Create the raster layer
+        # Create the raster layer with correct provider
         osm_layer = QgsRasterLayer(osm_url, "OpenStreetMap", "wms")
 
         # Check if the layer is valid
@@ -891,7 +930,9 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 - 'target_layer': QgsVectorLayer - The target layer
         """
         result = {
-            'is_complex': False,
+            'is_simple': False,
+            'is_easy_complex': False,
+            'is_super_complex': False,
             'operation_type': 'none',
             'included_layers': [],
             'spatial_markers': [],
@@ -927,12 +968,16 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Simple case: Only target layer, no additional assessment layers
         if num_assessment_layers == 0 and num_spatial_markers == 0:
-            result['is_complex'] = False
+            result['is_simple'] = True
+            result['is_easy_complex'] = False
+            result['is_super_complex'] = False
             result['operation_type'] = 'none'
 
         # Complex case: Multiple assessment layers require union/intersect operations
-        elif num_assessment_layers > 0:
-            result['is_complex'] = True
+        elif num_assessment_layers == 1 and num_spatial_markers == 1:
+            result['is_simple'] = False
+            result['is_easy_complex'] = True
+            result['is_super_complex'] = False
 
             # If we have included layers, we likely need union to combine them
             if num_assessment_layers >= 1:
@@ -941,7 +986,25 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             # If we have spatial markers, we might need intersect for filtering
             if num_spatial_markers > 0:
                 result['requires_intersect'] = True
+            # Determine operation type
+            if result['requires_union'] and result['requires_intersect']:
+                result['operation_type'] = 'both'   
+            elif result['requires_union']:
+                result['operation_type'] = 'union'
+            elif result['requires_intersect']:
+                result['operation_type'] = 'intersect'
 
+        elif num_assessment_layers > 1 or num_spatial_markers > 1:
+            result['is_simple'] = False
+            result['is_easy_complex'] = False
+            result['is_super_complex'] = True
+
+            # Multiple assessment layers require union
+            if num_assessment_layers > 1:
+                result['requires_union'] = True
+            # Multiple spatial markers require intersect
+            if num_spatial_markers > 1:
+                result['requires_intersect'] = True
             # Determine operation type
             if result['requires_union'] and result['requires_intersect']:
                 result['operation_type'] = 'both'
@@ -949,10 +1012,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 result['operation_type'] = 'union'
             elif result['requires_intersect']:
                 result['operation_type'] = 'intersect'
+        # Assessment layers only (no spatial markers)
+        elif num_assessment_layers > 0 and num_spatial_markers == 0:
+            result['is_simple'] = False
+            result['is_easy_complex'] = True
+            result['is_super_complex'] = False
+            result['requires_union'] = True
+            result['operation_type'] = 'union'
 
-        # Spatial markers only (less complex but still requires spatial operations)
-        elif num_spatial_markers > 0:
-            result['is_complex'] = True
+        # Spatial markers only (no assessment layers)
+        elif num_spatial_markers > 0 and num_assessment_layers == 0:
+            result['is_simple'] = False
+            result['is_easy_complex'] = True
+            result['is_super_complex'] = False
             result['requires_intersect'] = True
             result['operation_type'] = 'intersect'
 
@@ -966,9 +1038,45 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """
         complexity = self.detect_assessment_complexity()
 
-        if not complexity['is_complex']:
+        # Simple case: Only target layer
+        if complexity['is_simple']:
             return "Simple Assessment (Target layer only)"
 
+        # Easy complex case: 1 assessment layer + 1 spatial marker
+        if complexity['is_easy_complex']:
+            summary_parts = ["Easy Complex Assessment:"]
+            summary_parts.append(f"- 1 assessment layer to combine")
+            summary_parts.append(f"- 1 spatial marker for filtering")
+
+            if complexity['requires_union'] and complexity['requires_intersect']:
+                summary_parts.append("- Union and Intersection operations required")
+            elif complexity['requires_union']:
+                summary_parts.append("- Union operation required")
+            elif complexity['requires_intersect']:
+                summary_parts.append("- Intersection operation required")
+
+            return "\n".join(summary_parts)
+
+        # Super complex case: Multiple assessment layers or spatial markers
+        if complexity['is_super_complex']:
+            summary_parts = ["Super Complex Assessment:"]
+
+            if complexity['included_layers']:
+                summary_parts.append(f"- {len(complexity['included_layers'])} assessment layer(s) to combine")
+
+            if complexity['spatial_markers']:
+                summary_parts.append(f"- {len(complexity['spatial_markers'])} spatial marker(s) for filtering")
+
+            if complexity['requires_union'] and complexity['requires_intersect']:
+                summary_parts.append("- Union and Intersection operations required")
+            elif complexity['requires_union']:
+                summary_parts.append("- Union operation required")
+            elif complexity['requires_intersect']:
+                summary_parts.append("- Intersection operation required")
+
+            return "\n".join(summary_parts)
+
+        # Default complex case (assessment layers or spatial markers only)
         summary_parts = ["Complex Assessment:"]
 
         if complexity['included_layers']:
@@ -1005,20 +1113,16 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.label_summary_description.setText(assessment_description if assessment_description else "No description provided")
 
         # Detect assessment complexity and display information
-        complexity = self.detect_assessment_complexity()
+        # complexity = self.detect_assessment_complexity()
         assessment_summary = self.get_assessment_summary()
+
+        # Display complexity summary in the dedicated label
+        self.label_complexity_summary.setText(assessment_summary)
 
         # Get selected feature count from target layer
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             feature_count = self.target_layer.selectedFeatureCount()
-
-            # Build feature summary with complexity information
-            feature_summary = f"{feature_count} features selected"
-
-            if complexity['is_complex']:
-                feature_summary += f"\n\n{assessment_summary}"
-
-            self.label_summary_features.setText(feature_summary)
+            self.label_summary_features.setText(f"{feature_count} features selected")
         else:
             self.label_summary_features.setText("0 features selected")
 
