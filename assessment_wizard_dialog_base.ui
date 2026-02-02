@@ -84,6 +84,11 @@
       </column>
       <column>
        <property name="text">
+        <string>Geometry Type</string>
+       </property>
+      </column>
+      <column>
+       <property name="text">
         <string>Status</string>
        </property>
       </column>
@@ -310,6 +315,11 @@
          <column>
           <property name="text">
            <string>Layer Name</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Geometry Type</string>
           </property>
          </column>
          <column>

@@ -23,15 +23,19 @@
 """
 
 import os
+import json
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QHBoxLayout, QVBoxLayout
-from qgis.PyQt.QtCore import Qt, QSize
+from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QHBoxLayout, QVBoxLayout, QMessageBox, QProgressDialog
+from qgis.PyQt.QtCore import Qt, QSize, QCoreApplication
 from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsWkbTypes, QgsRectangle,
                        QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsVectorFileWriter)
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from PyQt5.QtGui import QColor
+
+# Import database manager
+from .database_manager import DatabaseManager, PSYCOPG2_AVAILABLE
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -433,7 +437,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Reset all layer status combos to "Do not include"
         for row in range(self.tableWidget_layers.rowCount()):
-            combo = self.tableWidget_layers.cellWidget(row, 1)
+            combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo:
                 combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
 
@@ -475,7 +479,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             layer_item = QTableWidgetItem(layer.name())
             self.tableWidget_layers.setItem(row_position, 0, layer_item)
 
-            # Column 1: Status dropdown
+            # Column 1: Geometry type
+            geometry_type = QgsWkbTypes.displayString(layer.wkbType())
+            geometry_item = QTableWidgetItem(geometry_type)
+            self.tableWidget_layers.setItem(row_position, 1, geometry_item)
+
+            # Column 2: Status dropdown
             status_combo = QComboBox()
             status_combo.addItems([
                 self.STATUS_DO_NOT_INCLUDE,
@@ -484,7 +493,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 self.STATUS_SPATIAL_MARKER
             ])
             status_combo.currentTextChanged.connect(self.on_status_changed)
-            self.tableWidget_layers.setCellWidget(row_position, 1, status_combo)
+            self.tableWidget_layers.setCellWidget(row_position, 2, status_combo)
 
         # Resize columns to fit content
         self.tableWidget_layers.resizeColumnsToContents()
@@ -497,9 +506,140 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
             # Find all combo boxes and reset any other "Include as Target" to "Do not include"
             for row in range(self.tableWidget_layers.rowCount()):
-                combo = self.tableWidget_layers.cellWidget(row, 1)
+                combo = self.tableWidget_layers.cellWidget(row, 2)
                 if combo and combo != sender and combo.currentText() == self.STATUS_TARGET:
                     combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
+
+    def migrate_selected_layers_to_postgres(self):
+        """Migrate all selected layers (not 'Do not include') to PostgreSQL using DatabaseManager."""
+        if not PSYCOPG2_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                "Database Error",
+                "psycopg2 library is not available. Please install it to use PostgreSQL migration.\n\n"
+                "Install with: pip install psycopg2-binary"
+            )
+            return False
+
+        try:
+            # Initialize database manager
+            db_manager = DatabaseManager(
+                host="localhost",
+                database="wizard_db",
+                user="postgres",
+                password="user123",
+                port="5432"
+            )
+
+            # Connect to database
+            try:
+                db_manager.connect()
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Database Connection Error",
+                    f"Failed to connect to PostgreSQL database 'wizard_db':\n{str(e)}"
+                )
+                return False
+
+            # Collect layers to migrate
+            layers_dict = {}
+            for row in range(self.tableWidget_layers.rowCount()):
+                layer_name_item = self.tableWidget_layers.item(row, 0)
+                status_combo = self.tableWidget_layers.cellWidget(row, 2)
+
+                if layer_name_item and status_combo:
+                    layer_name = layer_name_item.text()
+                    status = status_combo.currentText()
+
+                    # Migrate all layers except "Do not include"
+                    if status != self.STATUS_DO_NOT_INCLUDE:
+                        layers = QgsProject.instance().mapLayersByName(layer_name)
+                        if layers and isinstance(layers[0], QgsVectorLayer):
+                            layers_dict[layer_name] = layers[0]
+
+            if not layers_dict:
+                QMessageBox.information(
+                    self,
+                    "Migration Info",
+                    "No layers selected for migration."
+                )
+                db_manager.disconnect()
+                return True
+
+            # Create progress dialog
+            progress = QProgressDialog("Migrating layers to PostgreSQL...", "Cancel", 0, len(layers_dict), self)
+            progress.setWindowTitle("Database Migration")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+
+            # Progress callback function
+            def progress_callback(layer_index, total_layers, layer_name, message):
+                progress.setLabelText(message)
+                progress.setValue(layer_index)
+                QCoreApplication.processEvents()
+
+                if progress.wasCanceled():
+                    raise Exception("Migration cancelled by user")
+
+            # Migrate layers using database manager
+            all_stats = db_manager.migrate_layers(layers_dict, progress_callback)
+
+            # Set progress to complete
+            progress.setValue(len(layers_dict))
+
+            # Process results
+            total_stats = {'inserted': 0, 'updated': 0, 'unchanged': 0, 'errors': 0}
+            failed_layers = []
+
+            for stats in all_stats:
+                if 'error' in stats:
+                    failed_layers.append(f"{stats['table_name']}: {stats['error']}")
+                else:
+                    total_stats['inserted'] += stats['inserted']
+                    total_stats['updated'] += stats['updated']
+                    total_stats['unchanged'] += stats['unchanged']
+                    total_stats['errors'] += stats['errors']
+
+            # Show summary
+            if failed_layers:
+                QMessageBox.warning(
+                    self,
+                    "Migration Completed with Errors",
+                    f"Some layers failed to migrate:\n\n" + "\n".join(failed_layers)
+                )
+            else:
+                summary = f"Successfully migrated {len(layers_dict)} layer(s) to database 'wizard_db':\n\n"
+                summary += f"Total inserted: {total_stats['inserted']}\n"
+                summary += f"Total updated: {total_stats['updated']}\n"
+                summary += f"Total unchanged: {total_stats['unchanged']}\n"
+                if total_stats['errors'] > 0:
+                    summary += f"Total errors: {total_stats['errors']}"
+
+                QMessageBox.information(
+                    self,
+                    "Migration Successful",
+                    summary
+                )
+
+            db_manager.disconnect()
+            return True
+
+        except Exception as e:
+            if 'cancelled by user' in str(e).lower():
+                QMessageBox.information(
+                    self,
+                    "Migration Cancelled",
+                    "Migration cancelled by user."
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Migration Error",
+                    f"An error occurred during migration:\n{str(e)}"
+                )
+            return False
 
     def validate_page_1(self):
         """Validate page 1 before allowing user to proceed."""
@@ -515,7 +655,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Check if exactly one layer is set as "Include as Target"
         target_count = 0
         for row in range(self.tableWidget_layers.rowCount()):
-            combo = self.tableWidget_layers.cellWidget(row, 1)
+            combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo and combo.currentText() == self.STATUS_TARGET:
                 target_count += 1
 
@@ -542,7 +682,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Find the target layer and spatial marker layers
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name_item = self.tableWidget_layers.item(row, 0)
-            combo = self.tableWidget_layers.cellWidget(row, 1)
+            combo = self.tableWidget_layers.cellWidget(row, 2)
 
             if layer_name_item and combo:
                 layer_name = layer_name_item.text()
@@ -588,6 +728,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                         )
                         return False
 
+        # Migrate selected layers to PostgreSQL
+        if not self.migrate_selected_layers_to_postgres():
+            # Migration failed, but allow user to continue
+            # (they already saw the error message)
+            pass
+
         return True
 
     def get_layer_configurations(self):
@@ -595,7 +741,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         configurations = []
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name = self.tableWidget_layers.item(row, 0).text()
-            combo = self.tableWidget_layers.cellWidget(row, 1)
+            combo = self.tableWidget_layers.cellWidget(row, 2)
             status = combo.currentText() if combo else self.STATUS_DO_NOT_INCLUDE
 
             configurations.append({
@@ -809,7 +955,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def get_target_layer(self):
         """Get the layer marked as 'Include as Target' from page 1."""
         for row in range(self.tableWidget_layers.rowCount()):
-            combo = self.tableWidget_layers.cellWidget(row, 1)
+            combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo and combo.currentText() == self.STATUS_TARGET:
                 layer_name = self.tableWidget_layers.item(row, 0).text()
                 # Find the layer in the project
@@ -944,7 +1090,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Collect layers by status
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name_item = self.tableWidget_layers.item(row, 0)
-            status_combo = self.tableWidget_layers.cellWidget(row, 1)
+            status_combo = self.tableWidget_layers.cellWidget(row, 2)
 
             if layer_name_item and status_combo:
                 layer_name = layer_name_item.text()
@@ -1098,8 +1244,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def initialize_page_3(self):
         """Initialize the third wizard page."""
         # Set up the summary table headers
-        self.tableWidget_summary_layers.setColumnCount(2)
-        self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Status"])
+        self.tableWidget_summary_layers.setColumnCount(3)
+        self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Geometry Type", "Status"])
         self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
 
     def setup_page_3(self):
@@ -1132,7 +1278,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         row = 0
         for table_row in range(self.tableWidget_layers.rowCount()):
             layer_name_item = self.tableWidget_layers.item(table_row, 0)
-            status_combo = self.tableWidget_layers.cellWidget(table_row, 1)
+            geometry_type_item = self.tableWidget_layers.item(table_row, 1)
+            status_combo = self.tableWidget_layers.cellWidget(table_row, 2)
 
             if layer_name_item and status_combo:
                 status = status_combo.currentText()
@@ -1145,13 +1292,18 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     name_item = QTableWidgetItem(layer_name_item.text())
                     self.tableWidget_summary_layers.setItem(row, 0, name_item)
 
+                    # Add geometry type
+                    geometry_item = QTableWidgetItem(geometry_type_item.text() if geometry_type_item else "Unknown")
+                    self.tableWidget_summary_layers.setItem(row, 1, geometry_item)
+
                     # Add status
                     status_item = QTableWidgetItem(status)
-                    self.tableWidget_summary_layers.setItem(row, 1, status_item)
+                    self.tableWidget_summary_layers.setItem(row, 2, status_item)
 
                     # Highlight the target layer
                     if status == self.STATUS_TARGET:
                         name_item.setBackground(Qt.gray)
+                        geometry_item.setBackground(Qt.gray)
                         status_item.setBackground(Qt.gray)
 
                     row += 1
