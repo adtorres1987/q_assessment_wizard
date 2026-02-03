@@ -567,6 +567,43 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 db_manager.disconnect()
                 return True
 
+            # Check for existing tables and ask user
+            existing_tables = []
+            for layer_name in layers_dict.keys():
+                table_name = db_manager.sanitize_table_name(layer_name)
+                if db_manager.table_exists(table_name):
+                    existing_tables.append(layer_name)
+
+            if existing_tables:
+                # Build message with list of existing tables
+                tables_list = "\n".join([f"• {name}" for name in existing_tables])
+                message = f"The following tables already exist in the database:\n\n{tables_list}\n\n"
+                message += "Do you want to migrate these layers?\n\n"
+                message += "Note: Existing data will be updated if changed, or left unchanged if identical."
+
+                reply = QMessageBox.question(
+                    self,
+                    "Tables Already Exist",
+                    message,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+
+                if reply == QMessageBox.No:
+                    # Remove existing tables from migration
+                    for layer_name in existing_tables:
+                        del layers_dict[layer_name]
+
+                    # Check if there are still layers to migrate
+                    if not layers_dict:
+                        QMessageBox.information(
+                            self,
+                            "Migration Cancelled",
+                            "No new layers to migrate."
+                        )
+                        db_manager.disconnect()
+                        return True
+
             # Create progress dialog
             progress = QProgressDialog("Migrating layers to PostgreSQL...", "Cancel", 0, len(layers_dict), self)
             progress.setWindowTitle("Database Migration")

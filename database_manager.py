@@ -318,6 +318,65 @@ class DatabaseManager:
         cursor.close()
         return True
 
+    def create_id_index(self, table_name):
+        """
+        Create index on id column for faster lookups during validation
+
+        Args:
+            table_name: Name of table
+
+        Returns:
+            bool: True if index created or already exists, False on error
+        """
+        cursor = self.connection.cursor()
+
+        # Check if id index already exists
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+            AND tablename = %s
+            AND indexdef LIKE '%%id%%'
+            AND indexdef NOT LIKE '%%pkey%%'
+        """, (table_name,))
+
+        index_exists = cursor.fetchone()[0] > 0
+
+        if not index_exists:
+            try:
+                # Note: SERIAL PRIMARY KEY already creates an index, but we'll check for it
+                # Check if id column is primary key
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                        ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name = %s
+                    AND tc.constraint_type = 'PRIMARY KEY'
+                    AND kcu.column_name = 'id'
+                """, (table_name,))
+
+                has_primary_key = cursor.fetchone()[0] > 0
+
+                if not has_primary_key:
+                    # Create index if id is not primary key
+                    cursor.execute(f"CREATE INDEX {table_name}_id_idx ON {table_name} (id)")
+                    self.connection.commit()
+                    cursor.close()
+                    return True
+                else:
+                    # Primary key already provides index
+                    cursor.close()
+                    return True
+
+            except Exception as e:
+                print(f"Note: Could not create id index for {table_name}: {str(e)}")
+                cursor.close()
+                return False
+
+        cursor.close()
+        return True
+
     def get_existing_records(self, table_name):
         """
         Retrieve all existing records from table
@@ -401,11 +460,13 @@ class DatabaseManager:
             # Create table if it doesn't exist
             if not table_exists:
                 self.create_table(table_name, layer)
-                # Create spatial index for new table
+                # Create indexes for new table
                 self.create_spatial_index(table_name)
+                self.create_id_index(table_name)
             else:
-                # Ensure spatial index exists for existing table
+                # Ensure indexes exist for existing table
                 self.create_spatial_index(table_name)
+                self.create_id_index(table_name)
 
             # Get existing records if table existed
             existing_records = {}
