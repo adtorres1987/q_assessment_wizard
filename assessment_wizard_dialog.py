@@ -27,15 +27,16 @@ import json
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QHBoxLayout, QVBoxLayout, QMessageBox, QProgressDialog
+from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QVBoxLayout, QMessageBox, QProgressDialog
 from qgis.PyQt.QtCore import Qt, QSize, QCoreApplication
 from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsWkbTypes, QgsRectangle,
                        QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsVectorFileWriter)
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from PyQt5.QtGui import QColor
 
-# Import database manager
+# Import database manager and spatial analysis
 from .database_manager import DatabaseManager, PSYCOPG2_AVAILABLE
+from .spatial_analysis import SpatialAnalyzer, OperationType, MemorySpatialAnalyzer
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -402,6 +403,9 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.map_canvas = None
         self.map_canvas_page3 = None
         self.map_tool_select = None
+        self.selected_operation_type = OperationType.INTERSECT  # Default operation
+        self.combo_operation_type = None  # Will be created in initialize_page_3
+        self.operation_group = None  # Group box for operation selection
 
         # Initialize wizard pages
         self.initialize_page_1()
@@ -412,6 +416,170 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Override reject to clean up when user cancels the wizard."""
         self.cleanup_wizard_data()
         super(QassessmentWizardDialog, self).reject()
+
+    def accept(self):
+        """Override accept to perform spatial analysis when wizard finishes."""
+        # Get assessment name from page 1 (replace spaces with underscores)
+        assessment_name = self.lineEdit_name.text().strip().replace(' ', '_')
+
+        # Get target and assessment layers
+        target_layer = None
+        assessment_layers = []
+
+        for row in range(self.tableWidget_layers.rowCount()):
+            layer_name_item = self.tableWidget_layers.item(row, 0)
+            status_combo = self.tableWidget_layers.cellWidget(row, 2)
+
+            if layer_name_item and status_combo:
+                layer_name = layer_name_item.text()
+                status = status_combo.currentText()
+
+                layers = QgsProject.instance().mapLayersByName(layer_name)
+                if layers and isinstance(layers[0], QgsVectorLayer):
+                    if status == self.STATUS_TARGET:
+                        target_layer = layers[0]
+                    elif status == self.STATUS_INCLUDE:
+                        assessment_layers.append(layers[0])
+
+        # Check if we have a target layer
+        if not target_layer:
+            QMessageBox.warning(
+                self,
+                "Analysis Error",
+                "No target layer selected. Please select a layer as 'Include as Target'."
+            )
+            return
+
+        try:
+            # Show progress dialog
+            progress = QProgressDialog(
+                "Operation and analysis in progress...",
+                None,  # No cancel button
+                0, 0,  # Indeterminate progress
+                self
+            )
+            progress.setWindowTitle("Processing")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.show()
+            QCoreApplication.processEvents()
+
+            # Case 1: Only target layer selected - create layer with selected features only
+            if not assessment_layers:
+                # Get selected features from target layer
+                selected_features = list(target_layer.selectedFeatures())
+
+                if not selected_features:
+                    progress.close()
+                    QMessageBox.warning(
+                        self,
+                        "No Features Selected",
+                        "No features are selected in the target layer. Please select features in Page 2."
+                    )
+                    return
+
+                # Create memory layer with selected features
+                geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
+                crs = target_layer.crs().authid()
+
+                # Create new memory layer with same structure
+                memory_layer = QgsVectorLayer(
+                    f"{geom_type}?crs={crs}",
+                    assessment_name,
+                    "memory"
+                )
+
+                # Copy fields from source layer
+                memory_layer.dataProvider().addAttributes(target_layer.fields().toList())
+                memory_layer.updateFields()
+
+                # Add selected features
+                memory_layer.dataProvider().addFeatures(selected_features)
+                memory_layer.updateExtents()
+
+                # Add layer to project
+                QgsProject.instance().addMapLayer(memory_layer)
+
+                # Close progress dialog
+                progress.close()
+
+                QMessageBox.information(
+                    self,
+                    "Layer Created",
+                    f"Layer '{assessment_name}' created successfully!\n\n"
+                    f"Features: {len(selected_features)}"
+                )
+            else:
+                # Case 2: Target and assessment layers - perform spatial analysis
+                analyzer = MemorySpatialAnalyzer()
+                results = []
+
+                # Get selected operation type
+                operation_type = self.selected_operation_type
+
+                for assessment_layer in assessment_layers:
+                    # Create base output name using assessment name from page 1
+                    if len(assessment_layers) == 1:
+                        base_name = assessment_name
+                    else:
+                        base_name = f"{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
+
+                    # Handle different operation types
+                    if operation_type == OperationType.BOTH:
+                        # Perform both Intersection and Union
+                        result_intersect = analyzer.analyze_layers(
+                            target_layer,
+                            assessment_layer,
+                            f"{base_name}_intersection",
+                            OperationType.INTERSECT
+                        )
+                        results.append(result_intersect)
+
+                        result_union = analyzer.analyze_layers(
+                            target_layer,
+                            assessment_layer,
+                            f"{base_name}_union",
+                            OperationType.UNION
+                        )
+                        results.append(result_union)
+                    else:
+                        # Perform single operation (Intersection or Union)
+                        result = analyzer.analyze_layers(
+                            target_layer,
+                            assessment_layer,
+                            base_name,
+                            operation_type
+                        )
+                        results.append(result)
+
+                # Close progress dialog
+                progress.close()
+
+                # Show success message
+                if results:
+                    total_features = sum(r['feature_count'] for r in results)
+                    layer_names = "\n• ".join(r['layer_name'] for r in results)
+
+                    QMessageBox.information(
+                        self,
+                        "Analysis Complete",
+                        f"Spatial analysis completed successfully!\n\n"
+                        f"Created layer(s):\n• {layer_names}\n\n"
+                        f"Total features: {total_features}"
+                    )
+
+            # Clean up and close wizard
+            self.cleanup_wizard_data()
+            super(QassessmentWizardDialog, self).accept()
+
+        except Exception as e:
+            # Close progress dialog on error
+            progress.close()
+            QMessageBox.critical(
+                self,
+                "Analysis Error",
+                f"Spatial analysis failed:\n{str(e)}"
+            )
 
     def cleanup_wizard_data(self):
         """Clean up all data when wizard is cancelled or finished."""
@@ -676,6 +844,211 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     "Migration Error",
                     f"An error occurred during migration:\n{str(e)}"
                 )
+            return False
+
+    def perform_spatial_analysis(self):
+        """
+        Perform spatial analysis when one layer is TARGET and at least one is ASSESSMENT.
+        Creates a new layer with intersected and non-intersected geometries.
+        """
+        if not PSYCOPG2_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                "Database Error",
+                "psycopg2 library is not available. Spatial analysis requires PostgreSQL.\n\n"
+                "Install with: pip install psycopg2-binary"
+            )
+            return False
+
+        # Find target and assessment layers from the table
+        target_layer_name = None
+        assessment_layer_names = []
+
+        for row in range(self.tableWidget_layers.rowCount()):
+            layer_name_item = self.tableWidget_layers.item(row, 0)
+            status_combo = self.tableWidget_layers.cellWidget(row, 2)
+
+            if layer_name_item and status_combo:
+                layer_name = layer_name_item.text()
+                status = status_combo.currentText()
+
+                if status == self.STATUS_TARGET:
+                    target_layer_name = layer_name
+                elif status == self.STATUS_INCLUDE:
+                    assessment_layer_names.append(layer_name)
+
+        # Check if we have both target and assessment layers
+        if not target_layer_name:
+            QMessageBox.information(
+                self,
+                "Spatial Analysis",
+                "No target layer selected. Spatial analysis requires one layer marked as 'Include as Target'."
+            )
+            return False
+
+        if not assessment_layer_names:
+            QMessageBox.information(
+                self,
+                "Spatial Analysis",
+                "No assessment layers selected. Spatial analysis requires at least one layer marked as 'Include in assessment'."
+            )
+            return False
+
+        try:
+            # Initialize database manager
+            db_manager = DatabaseManager(
+                host="localhost",
+                database="wizard_db",
+                user="postgres",
+                password="user123",
+                port="5432"
+            )
+
+            # Connect to database
+            try:
+                db_manager.connect()
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Database Connection Error",
+                    f"Failed to connect to PostgreSQL database:\n{str(e)}"
+                )
+                return False
+
+            # Initialize spatial analyzer
+            analyzer = SpatialAnalyzer(db_manager)
+
+            # Sanitize table names
+            target_table = db_manager.sanitize_table_name(target_layer_name)
+
+            # Check if target table exists
+            if not db_manager.table_exists(target_table):
+                QMessageBox.warning(
+                    self,
+                    "Analysis Error",
+                    f"Target layer '{target_layer_name}' has not been migrated to PostgreSQL.\n\n"
+                    "Please migrate layers first using the 'Migrate to PostgreSQL' button."
+                )
+                db_manager.disconnect()
+                return False
+
+            # Process each assessment layer
+            results = []
+            for assessment_layer_name in assessment_layer_names:
+                assessment_table = db_manager.sanitize_table_name(assessment_layer_name)
+
+                # Check if assessment table exists
+                if not db_manager.table_exists(assessment_table):
+                    QMessageBox.warning(
+                        self,
+                        "Analysis Error",
+                        f"Assessment layer '{assessment_layer_name}' has not been migrated to PostgreSQL.\n\n"
+                        "Please migrate layers first."
+                    )
+                    continue
+
+                # Validate geometry compatibility
+                try:
+                    validation = analyzer.validate_geometry_compatibility(target_table, assessment_table)
+                    if not validation['compatible']:
+                        reply = QMessageBox.question(
+                            self,
+                            "Geometry Incompatibility",
+                            f"Layers are not compatible for spatial analysis:\n\n{validation['message']}\n\n"
+                            "Do you want to skip this layer and continue?",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.Yes
+                        )
+                        if reply == QMessageBox.Yes:
+                            continue
+                        else:
+                            db_manager.disconnect()
+                            return False
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Validation Error",
+                        f"Could not validate geometry compatibility for '{assessment_layer_name}':\n{str(e)}"
+                    )
+                    continue
+
+                # Generate output table name
+                output_table = f"{target_table}_vs_{assessment_table}_analysis"
+                output_layer_name = f"{target_layer_name} vs {assessment_layer_name} (Analysis)"
+
+                # Perform analysis
+                try:
+                    progress = QProgressDialog(
+                        f"Analyzing {target_layer_name} vs {assessment_layer_name}...",
+                        "Cancel",
+                        0, 100,
+                        self
+                    )
+                    progress.setWindowTitle("Spatial Analysis")
+                    progress.setWindowModality(Qt.WindowModal)
+                    progress.setMinimumDuration(0)
+                    progress.setValue(50)
+                    QCoreApplication.processEvents()
+
+                    # Perform the analysis and create layer
+                    result = analyzer.analyze_and_create_layer(
+                        target_table,
+                        assessment_table,
+                        output_table,
+                        output_layer_name,
+                        OperationType.BOTH
+                    )
+
+                    progress.setValue(100)
+
+                    results.append({
+                        'target': target_layer_name,
+                        'assessment': assessment_layer_name,
+                        'result': result
+                    })
+
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Analysis Error",
+                        f"Failed to analyze {target_layer_name} vs {assessment_layer_name}:\n{str(e)}"
+                    )
+                    continue
+
+            # Disconnect from database
+            db_manager.disconnect()
+
+            # Show summary of results
+            if results:
+                summary = f"Spatial analysis completed for {len(results)} layer pair(s):\n\n"
+                for r in results:
+                    res = r['result']
+                    summary += f"• {r['target']} vs {r['assessment']}:\n"
+                    summary += f"  - Total features: {res['total']}\n"
+                    summary += f"  - Intersected: {res['intersected']}\n"
+                    summary += f"  - Non-intersected: {res['non_intersected']}\n"
+                    summary += f"  - Layer created: {res['layer_name']}\n\n"
+
+                QMessageBox.information(
+                    self,
+                    "Spatial Analysis Complete",
+                    summary
+                )
+                return True
+            else:
+                QMessageBox.information(
+                    self,
+                    "Spatial Analysis",
+                    "No analysis was performed."
+                )
+                return False
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Analysis Error",
+                f"An error occurred during spatial analysis:\n{str(e)}"
+            )
             return False
 
     def validate_page_1(self):
@@ -1101,16 +1474,47 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             return list(self.target_layer.selectedFeatureIds())
         return []
 
+    def _get_geometry_category(self, layer):
+        """Get the geometry category for a layer (Point, Line, or Polygon).
+
+        Args:
+            layer: QgsVectorLayer
+
+        Returns:
+            str: 'Point', 'Line', 'Polygon', or 'Unknown'
+        """
+        if not layer or not layer.isValid():
+            return 'Unknown'
+
+        geom_type = layer.geometryType()
+        # QgsWkbTypes.GeometryType: 0=Point, 1=Line, 2=Polygon
+        if geom_type == 0:  # Point
+            return 'Point'
+        elif geom_type == 1:  # Line
+            return 'Line'
+        elif geom_type == 2:  # Polygon
+            return 'Polygon'
+        else:
+            return 'Unknown'
+
     def detect_assessment_complexity(self):
         """Detect if this is a simple or complex assessment case.
 
+        Validates geometry compatibility based on:
+        - Point + Polygon -> Intersect only
+        - Line + Polygon -> Intersect only
+        - Polygon + Polygon -> Intersect / Union (both valid)
+        - Point + Point -> Union (normally not useful, warning)
+
         Returns:
             dict: A dictionary containing:
-                - 'is_complex': bool - True if multiple layers require spatial operations
-                - 'operation_type': str - Type of operation needed ('none', 'union', 'intersect', 'both')
+                - 'is_simple': bool - True if only target layer
+                - 'operation_type': str - Type of operation needed
                 - 'included_layers': list - Layers marked as 'Include in assessment'
                 - 'spatial_markers': list - Layers marked as 'Spatial Marker'
                 - 'target_layer': QgsVectorLayer - The target layer
+                - 'valid_operations': list - Valid operations based on geometry types
+                - 'geometry_warning': str - Warning message if geometry combination is unusual
         """
         result = {
             'is_simple': False,
@@ -1121,7 +1525,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             'spatial_markers': [],
             'target_layer': None,
             'requires_union': False,
-            'requires_intersect': False
+            'requires_intersect': False,
+            'valid_operations': [],
+            'geometry_warning': None,
+            'target_geometry': None,
+            'assessment_geometry': None
         }
 
         # Collect layers by status
@@ -1140,76 +1548,95 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
                     if status == self.STATUS_TARGET:
                         result['target_layer'] = layer
+                        result['target_geometry'] = self._get_geometry_category(layer)
                     elif status == self.STATUS_INCLUDE:
                         result['included_layers'].append(layer)
                     elif status == self.STATUS_SPATIAL_MARKER:
                         result['spatial_markers'].append(layer)
 
-        # Determine complexity based on number of layers
+        # Determine geometry types and valid operations
         num_assessment_layers = len(result['included_layers'])
         num_spatial_markers = len(result['spatial_markers'])
+        target_geom = result['target_geometry']
 
         # Simple case: Only target layer, no additional assessment layers
         if num_assessment_layers == 0 and num_spatial_markers == 0:
             result['is_simple'] = True
-            result['is_easy_complex'] = False
-            result['is_super_complex'] = False
             result['operation_type'] = 'none'
+            result['valid_operations'] = []
+            return result
 
-        # Complex case: Multiple assessment layers require union/intersect operations
-        elif num_assessment_layers == 1 and num_spatial_markers == 1:
-            result['is_simple'] = False
-            result['is_easy_complex'] = True
-            result['is_super_complex'] = False
+        # Get assessment layer geometry (use first assessment layer for validation)
+        if result['included_layers']:
+            assessment_geom = self._get_geometry_category(result['included_layers'][0])
+            result['assessment_geometry'] = assessment_geom
 
-            # If we have included layers, we likely need union to combine them
-            if num_assessment_layers >= 1:
-                result['requires_union'] = True
-
-            # If we have spatial markers, we might need intersect for filtering
-            if num_spatial_markers > 0:
+            # Determine valid operations based on geometry combination
+            # Point + Polygon -> Intersect only
+            if target_geom == 'Point' and assessment_geom == 'Polygon':
+                result['valid_operations'] = ['intersect']
                 result['requires_intersect'] = True
-            # Determine operation type
-            if result['requires_union'] and result['requires_intersect']:
-                result['operation_type'] = 'both'   
-            elif result['requires_union']:
-                result['operation_type'] = 'union'
-            elif result['requires_intersect']:
                 result['operation_type'] = 'intersect'
 
-        elif num_assessment_layers > 1 or num_spatial_markers > 1:
-            result['is_simple'] = False
-            result['is_easy_complex'] = False
-            result['is_super_complex'] = True
-
-            # Multiple assessment layers require union
-            if num_assessment_layers > 1:
-                result['requires_union'] = True
-            # Multiple spatial markers require intersect
-            if num_spatial_markers > 1:
+            # Line + Polygon -> Intersect only
+            elif target_geom == 'Line' and assessment_geom == 'Polygon':
+                result['valid_operations'] = ['intersect']
                 result['requires_intersect'] = True
-            # Determine operation type
-            if result['requires_union'] and result['requires_intersect']:
+                result['operation_type'] = 'intersect'
+
+            # Polygon + Polygon -> Intersect / Union (both valid)
+            elif target_geom == 'Polygon' and assessment_geom == 'Polygon':
+                result['valid_operations'] = ['intersect', 'union', 'both']
+                result['requires_intersect'] = True
+                result['requires_union'] = True
                 result['operation_type'] = 'both'
-            elif result['requires_union']:
-                result['operation_type'] = 'union'
-            elif result['requires_intersect']:
-                result['operation_type'] = 'intersect'
-        # Assessment layers only (no spatial markers)
-        elif num_assessment_layers > 0 and num_spatial_markers == 0:
-            result['is_simple'] = False
-            result['is_easy_complex'] = True
-            result['is_super_complex'] = False
-            result['requires_union'] = True
-            result['operation_type'] = 'union'
 
-        # Spatial markers only (no assessment layers)
-        elif num_spatial_markers > 0 and num_assessment_layers == 0:
-            result['is_simple'] = False
+            # Point + Point -> Union (normally not useful)
+            elif target_geom == 'Point' and assessment_geom == 'Point':
+                result['valid_operations'] = ['union']
+                result['requires_union'] = True
+                result['operation_type'] = 'union'
+                result['geometry_warning'] = 'Union between Point layers is normally not useful'
+
+            # Line + Line -> Union (normally not useful)
+            elif target_geom == 'Line' and assessment_geom == 'Line':
+                result['valid_operations'] = ['union']
+                result['requires_union'] = True
+                result['operation_type'] = 'union'
+                result['geometry_warning'] = 'Union between Line layers is normally not useful'
+
+            # Polygon + Point -> Intersect only (reversed case)
+            elif target_geom == 'Polygon' and assessment_geom == 'Point':
+                result['valid_operations'] = ['intersect']
+                result['requires_intersect'] = True
+                result['operation_type'] = 'intersect'
+
+            # Polygon + Line -> Intersect only (reversed case)
+            elif target_geom == 'Polygon' and assessment_geom == 'Line':
+                result['valid_operations'] = ['intersect']
+                result['requires_intersect'] = True
+                result['operation_type'] = 'intersect'
+
+            # Line + Point or Point + Line -> Intersect only
+            elif (target_geom == 'Line' and assessment_geom == 'Point') or \
+                 (target_geom == 'Point' and assessment_geom == 'Line'):
+                result['valid_operations'] = ['intersect']
+                result['requires_intersect'] = True
+                result['operation_type'] = 'intersect'
+
+            # Default case
+            else:
+                result['valid_operations'] = ['intersect']
+                result['requires_intersect'] = True
+                result['operation_type'] = 'intersect'
+
+        # Determine complexity level
+        if num_assessment_layers == 1 and num_spatial_markers <= 1:
             result['is_easy_complex'] = True
-            result['is_super_complex'] = False
-            result['requires_intersect'] = True
-            result['operation_type'] = 'intersect'
+        elif num_assessment_layers > 1 or num_spatial_markers > 1:
+            result['is_super_complex'] = True
+        else:
+            result['is_easy_complex'] = True
 
         return result
 
@@ -1285,6 +1712,38 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Geometry Type", "Status"])
         self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
 
+        # Create operation type selector (only once)
+        if not self.operation_group:
+            from qgis.PyQt.QtWidgets import QLabel, QHBoxLayout, QWidget, QGroupBox
+
+            # Create group box for operation selection
+            self.operation_group = QGroupBox("Spatial Operation")
+            operation_layout = QHBoxLayout(self.operation_group)
+
+            # Create label
+            label_operation = QLabel("Select operation:")
+            operation_layout.addWidget(label_operation)
+
+            # Create combo box for operation type
+            self.combo_operation_type = QComboBox()
+            self.combo_operation_type.addItem("Intersection", OperationType.INTERSECT)
+            self.combo_operation_type.addItem("Union", OperationType.UNION)
+            self.combo_operation_type.addItem("Both (Intersection + Union)", OperationType.BOTH)
+            self.combo_operation_type.currentIndexChanged.connect(self.on_operation_type_changed)
+            operation_layout.addWidget(self.combo_operation_type)
+
+            operation_layout.addStretch()
+
+            # Add to page layout
+            if hasattr(self, 'verticalLayout_page3') and self.verticalLayout_page3:
+                self.verticalLayout_page3.insertWidget(0, self.operation_group)
+            elif self.page_3.layout():
+                self.page_3.layout().insertWidget(0, self.operation_group)
+
+    def on_operation_type_changed(self, index):
+        """Handle operation type change."""
+        self.selected_operation_type = self.combo_operation_type.itemData(index)
+
     def setup_page_3(self):
         """Populate page 3 with summary information."""
         # Get assessment name and description from page 1
@@ -1301,6 +1760,39 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Display complexity summary in the dedicated label
         self.label_complexity_summary.setText(assessment_summary)
+
+        # Detect assessment complexity to get valid operations
+        complexity = self.detect_assessment_complexity()
+        has_assessment_layers = len(complexity['included_layers']) > 0
+
+        # Show/hide operation group based on whether there are assessment layers
+        if self.operation_group:
+            self.operation_group.setVisible(has_assessment_layers)
+
+            # Update combo box with only valid operations based on geometry types
+            if has_assessment_layers and self.combo_operation_type:
+                self.combo_operation_type.clear()
+                valid_ops = complexity['valid_operations']
+
+                if 'intersect' in valid_ops:
+                    self.combo_operation_type.addItem("Intersection", OperationType.INTERSECT)
+                if 'union' in valid_ops:
+                    self.combo_operation_type.addItem("Union", OperationType.UNION)
+                if 'both' in valid_ops:
+                    self.combo_operation_type.addItem("Both (Intersection + Union)", OperationType.BOTH)
+
+                # Set default selection
+                if self.combo_operation_type.count() > 0:
+                    self.combo_operation_type.setCurrentIndex(0)
+                    self.selected_operation_type = self.combo_operation_type.itemData(0)
+
+                # Show warning if geometry combination is unusual
+                if complexity['geometry_warning']:
+                    # Update group title to show warning
+                    self.operation_group.setTitle(f"Spatial Operation - Warning: {complexity['geometry_warning']}")
+                else:
+                    # Reset title to normal
+                    self.operation_group.setTitle("Spatial Operation")
 
         # Get selected feature count from target layer
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
