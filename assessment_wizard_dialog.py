@@ -403,9 +403,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.map_canvas = None
         self.map_canvas_page3 = None
         self.map_tool_select = None
-        self.selected_operation_type = OperationType.INTERSECT  # Default operation
-        self.combo_operation_type = None  # Will be created in initialize_page_3
-        self.operation_group = None  # Group box for operation selection
 
         # Initialize wizard pages
         self.initialize_page_1()
@@ -482,10 +479,13 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
                 crs = target_layer.crs().authid()
 
+                # Layer name with "_simple_case" suffix
+                layer_name = f"{assessment_name}_simple_case"
+
                 # Create new memory layer with same structure
                 memory_layer = QgsVectorLayer(
                     f"{geom_type}?crs={crs}",
-                    assessment_name,
+                    layer_name,
                     "memory"
                 )
 
@@ -506,16 +506,13 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 QMessageBox.information(
                     self,
                     "Layer Created",
-                    f"Layer '{assessment_name}' created successfully!\n\n"
+                    f"Layer '{layer_name}' created successfully!\n\n"
                     f"Features: {len(selected_features)}"
                 )
             else:
-                # Case 2: Target and assessment layers - perform spatial analysis
+                # Case 2: Target and assessment layers - perform both intersection and union
                 analyzer = MemorySpatialAnalyzer()
                 results = []
-
-                # Get selected operation type
-                operation_type = self.selected_operation_type
 
                 for assessment_layer in assessment_layers:
                     # Create base output name using assessment name from page 1
@@ -524,33 +521,22 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     else:
                         base_name = f"{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
 
-                    # Handle different operation types
-                    if operation_type == OperationType.BOTH:
-                        # Perform both Intersection and Union
-                        result_intersect = analyzer.analyze_layers(
-                            target_layer,
-                            assessment_layer,
-                            f"{base_name}_intersection",
-                            OperationType.INTERSECT
-                        )
-                        results.append(result_intersect)
+                    # Always perform both Intersection and Union
+                    result_intersect = analyzer.analyze_layers(
+                        target_layer,
+                        assessment_layer,
+                        f"{base_name}_intersection",
+                        OperationType.INTERSECT
+                    )
+                    results.append(result_intersect)
 
-                        result_union = analyzer.analyze_layers(
-                            target_layer,
-                            assessment_layer,
-                            f"{base_name}_union",
-                            OperationType.UNION
-                        )
-                        results.append(result_union)
-                    else:
-                        # Perform single operation (Intersection or Union)
-                        result = analyzer.analyze_layers(
-                            target_layer,
-                            assessment_layer,
-                            base_name,
-                            operation_type
-                        )
-                        results.append(result)
+                    result_union = analyzer.analyze_layers(
+                        target_layer,
+                        assessment_layer,
+                        f"{base_name}_union",
+                        OperationType.UNION
+                    )
+                    results.append(result_union)
 
                 # Close progress dialog
                 progress.close()
@@ -1712,37 +1698,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Geometry Type", "Status"])
         self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
 
-        # Create operation type selector (only once)
-        if not self.operation_group:
-            from qgis.PyQt.QtWidgets import QLabel, QHBoxLayout, QWidget, QGroupBox
-
-            # Create group box for operation selection
-            self.operation_group = QGroupBox("Spatial Operation")
-            operation_layout = QHBoxLayout(self.operation_group)
-
-            # Create label
-            label_operation = QLabel("Select operation:")
-            operation_layout.addWidget(label_operation)
-
-            # Create combo box for operation type
-            self.combo_operation_type = QComboBox()
-            self.combo_operation_type.addItem("Intersection", OperationType.INTERSECT)
-            self.combo_operation_type.addItem("Union", OperationType.UNION)
-            self.combo_operation_type.addItem("Both (Intersection + Union)", OperationType.BOTH)
-            self.combo_operation_type.currentIndexChanged.connect(self.on_operation_type_changed)
-            operation_layout.addWidget(self.combo_operation_type)
-
-            operation_layout.addStretch()
-
-            # Add to page layout
-            if hasattr(self, 'verticalLayout_page3') and self.verticalLayout_page3:
-                self.verticalLayout_page3.insertWidget(0, self.operation_group)
-            elif self.page_3.layout():
-                self.page_3.layout().insertWidget(0, self.operation_group)
-
-    def on_operation_type_changed(self, index):
-        """Handle operation type change."""
-        self.selected_operation_type = self.combo_operation_type.itemData(index)
 
     def setup_page_3(self):
         """Populate page 3 with summary information."""
@@ -1761,38 +1716,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Display complexity summary in the dedicated label
         self.label_complexity_summary.setText(assessment_summary)
 
-        # Detect assessment complexity to get valid operations
-        complexity = self.detect_assessment_complexity()
-        has_assessment_layers = len(complexity['included_layers']) > 0
-
-        # Show/hide operation group based on whether there are assessment layers
-        if self.operation_group:
-            self.operation_group.setVisible(has_assessment_layers)
-
-            # Update combo box with only valid operations based on geometry types
-            if has_assessment_layers and self.combo_operation_type:
-                self.combo_operation_type.clear()
-                valid_ops = complexity['valid_operations']
-
-                if 'intersect' in valid_ops:
-                    self.combo_operation_type.addItem("Intersection", OperationType.INTERSECT)
-                if 'union' in valid_ops:
-                    self.combo_operation_type.addItem("Union", OperationType.UNION)
-                if 'both' in valid_ops:
-                    self.combo_operation_type.addItem("Both (Intersection + Union)", OperationType.BOTH)
-
-                # Set default selection
-                if self.combo_operation_type.count() > 0:
-                    self.combo_operation_type.setCurrentIndex(0)
-                    self.selected_operation_type = self.combo_operation_type.itemData(0)
-
-                # Show warning if geometry combination is unusual
-                if complexity['geometry_warning']:
-                    # Update group title to show warning
-                    self.operation_group.setTitle(f"Spatial Operation - Warning: {complexity['geometry_warning']}")
-                else:
-                    # Reset title to normal
-                    self.operation_group.setTitle("Spatial Operation")
 
         # Get selected feature count from target layer
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
@@ -1876,31 +1799,33 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             # Set CRS to Web Mercator for OSM compatibility
             self.map_canvas_page3.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
 
-            # Get Spatial Marker layers from page 1 configuration
-            spatial_marker_layers = []
+            # Get "Include as assessment" layers from page 1 configuration
+            assessment_layers = []
             for table_row in range(self.tableWidget_layers.rowCount()):
                 layer_name_item = self.tableWidget_layers.item(table_row, 0)
-                status_combo = self.tableWidget_layers.cellWidget(table_row, 1)
+                status_combo = self.tableWidget_layers.cellWidget(table_row, 2)
 
                 if layer_name_item and status_combo:
                     status = status_combo.currentText()
 
-                    # Find layers with Spatial Marker status
-                    if status == self.STATUS_SPATIAL_MARKER:
+                    # Find layers with "Include in assessment" status
+                    if status == self.STATUS_INCLUDE:
                         layer_name = layer_name_item.text()
                         layers = QgsProject.instance().mapLayersByName(layer_name)
                         if layers and isinstance(layers[0], QgsVectorLayer):
-                            spatial_marker_layers.append(layers[0])
+                            assessment_layers.append(layers[0])
 
-            # Set layers to display in order: selected features (top), spatial markers, OSM (base)
-            # In QGIS, layers are rendered from bottom to top, so we add them in reverse order
+            # Set layers to display in order (first in list = top, last = bottom):
+            # 1. Target layer with selected features (top - most visible)
+            # 2. Assessment layers (middle)
+            # 3. OSM base layer (bottom)
             layers_to_display = []
 
-            # 1. Selected features layer (will be on top - most visible)
+            # 1. Selected features layer / Target (will be on top - most visible)
             layers_to_display.append(self.selected_features_layer)
 
-            # 2. Spatial Marker layers (middle)
-            layers_to_display.extend(spatial_marker_layers)
+            # 2. Assessment layers (middle)
+            layers_to_display.extend(assessment_layers)
 
             # 3. OSM base layer (bottom)
             if osm_layer and osm_layer.isValid():
