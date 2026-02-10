@@ -23,20 +23,19 @@
 """
 
 import os
-import json
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QVBoxLayout, QMessageBox, QProgressDialog
 from qgis.PyQt.QtCore import Qt, QSize, QCoreApplication
 from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsWkbTypes, QgsRectangle,
-                       QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsVectorFileWriter)
+                       QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform)
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from PyQt5.QtGui import QColor
 
 # Import database manager and spatial analysis
 from .database_manager import DatabaseManager, PSYCOPG2_AVAILABLE
-from .spatial_analysis import SpatialAnalyzer, OperationType, MemorySpatialAnalyzer
+from .spatial_analysis import SpatialAnalyzer, OperationType
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -510,41 +509,63 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     f"Features: {len(selected_features)}"
                 )
             else:
-                # Case 2: Target and assessment layers - perform both intersection and union
-                analyzer = MemorySpatialAnalyzer()
+                # Case 2: Target and assessment layers - perform both intersection and union using PostgreSQL
+                # Initialize database manager
+                db_manager = DatabaseManager(
+                    host="localhost",
+                    database="wizard_db",
+                    user="postgres",
+                    password="user123",
+                    port="5432"
+                )
+                db_manager.connect()
+
+                analyzer = SpatialAnalyzer(db_manager)
                 results = []
 
                 for assessment_layer in assessment_layers:
+                    # Get table names (sanitized) for PostgreSQL
+                    target_table = db_manager.sanitize_table_name(target_layer.name())
+                    assessment_table = db_manager.sanitize_table_name(assessment_layer.name())
+
                     # Create base output name using assessment name from page 1
                     if len(assessment_layers) == 1:
                         base_name = assessment_name
                     else:
                         base_name = f"{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
 
-                    # Always perform both Intersection and Union
-                    result_intersect = analyzer.analyze_layers(
-                        target_layer,
-                        assessment_layer,
-                        f"{base_name}_intersection",
-                        OperationType.INTERSECT
+                    # Perform Intersection using PostgreSQL
+                    output_table_intersect = db_manager.sanitize_table_name(f"{base_name}_intersection")
+                    result_intersect = analyzer.analyze_and_create_layer(
+                        target_table,
+                        assessment_table,
+                        output_table_intersect,
+                        layer_name=f"{base_name}_intersection",
+                        operation_type=OperationType.INTERSECT
                     )
                     results.append(result_intersect)
 
-                    result_union = analyzer.analyze_layers(
-                        target_layer,
-                        assessment_layer,
-                        f"{base_name}_union",
-                        OperationType.UNION
+                    # Perform Union using PostgreSQL
+                    output_table_union = db_manager.sanitize_table_name(f"{base_name}_union")
+                    result_union = analyzer.analyze_and_create_layer(
+                        target_table,
+                        assessment_table,
+                        output_table_union,
+                        layer_name=f"{base_name}_union",
+                        operation_type=OperationType.UNION
                     )
                     results.append(result_union)
+
+                # Disconnect from database
+                db_manager.disconnect()
 
                 # Close progress dialog
                 progress.close()
 
                 # Show success message
                 if results:
-                    total_features = sum(r['feature_count'] for r in results)
-                    layer_names = "\n• ".join(r['layer_name'] for r in results)
+                    total_features = sum(r['total_count'] for r in results)
+                    layer_names = "\n• ".join(r['layer'].name() for r in results)
 
                     QMessageBox.information(
                         self,
@@ -832,211 +853,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 )
             return False
 
-    def perform_spatial_analysis(self):
-        """
-        Perform spatial analysis when one layer is TARGET and at least one is ASSESSMENT.
-        Creates a new layer with intersected and non-intersected geometries.
-        """
-        if not PSYCOPG2_AVAILABLE:
-            QMessageBox.warning(
-                self,
-                "Database Error",
-                "psycopg2 library is not available. Spatial analysis requires PostgreSQL.\n\n"
-                "Install with: pip install psycopg2-binary"
-            )
-            return False
-
-        # Find target and assessment layers from the table
-        target_layer_name = None
-        assessment_layer_names = []
-
-        for row in range(self.tableWidget_layers.rowCount()):
-            layer_name_item = self.tableWidget_layers.item(row, 0)
-            status_combo = self.tableWidget_layers.cellWidget(row, 2)
-
-            if layer_name_item and status_combo:
-                layer_name = layer_name_item.text()
-                status = status_combo.currentText()
-
-                if status == self.STATUS_TARGET:
-                    target_layer_name = layer_name
-                elif status == self.STATUS_INCLUDE:
-                    assessment_layer_names.append(layer_name)
-
-        # Check if we have both target and assessment layers
-        if not target_layer_name:
-            QMessageBox.information(
-                self,
-                "Spatial Analysis",
-                "No target layer selected. Spatial analysis requires one layer marked as 'Include as Target'."
-            )
-            return False
-
-        if not assessment_layer_names:
-            QMessageBox.information(
-                self,
-                "Spatial Analysis",
-                "No assessment layers selected. Spatial analysis requires at least one layer marked as 'Include in assessment'."
-            )
-            return False
-
-        try:
-            # Initialize database manager
-            db_manager = DatabaseManager(
-                host="localhost",
-                database="wizard_db",
-                user="postgres",
-                password="user123",
-                port="5432"
-            )
-
-            # Connect to database
-            try:
-                db_manager.connect()
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Database Connection Error",
-                    f"Failed to connect to PostgreSQL database:\n{str(e)}"
-                )
-                return False
-
-            # Initialize spatial analyzer
-            analyzer = SpatialAnalyzer(db_manager)
-
-            # Sanitize table names
-            target_table = db_manager.sanitize_table_name(target_layer_name)
-
-            # Check if target table exists
-            if not db_manager.table_exists(target_table):
-                QMessageBox.warning(
-                    self,
-                    "Analysis Error",
-                    f"Target layer '{target_layer_name}' has not been migrated to PostgreSQL.\n\n"
-                    "Please migrate layers first using the 'Migrate to PostgreSQL' button."
-                )
-                db_manager.disconnect()
-                return False
-
-            # Process each assessment layer
-            results = []
-            for assessment_layer_name in assessment_layer_names:
-                assessment_table = db_manager.sanitize_table_name(assessment_layer_name)
-
-                # Check if assessment table exists
-                if not db_manager.table_exists(assessment_table):
-                    QMessageBox.warning(
-                        self,
-                        "Analysis Error",
-                        f"Assessment layer '{assessment_layer_name}' has not been migrated to PostgreSQL.\n\n"
-                        "Please migrate layers first."
-                    )
-                    continue
-
-                # Validate geometry compatibility
-                try:
-                    validation = analyzer.validate_geometry_compatibility(target_table, assessment_table)
-                    if not validation['compatible']:
-                        reply = QMessageBox.question(
-                            self,
-                            "Geometry Incompatibility",
-                            f"Layers are not compatible for spatial analysis:\n\n{validation['message']}\n\n"
-                            "Do you want to skip this layer and continue?",
-                            QMessageBox.Yes | QMessageBox.No,
-                            QMessageBox.Yes
-                        )
-                        if reply == QMessageBox.Yes:
-                            continue
-                        else:
-                            db_manager.disconnect()
-                            return False
-                except Exception as e:
-                    QMessageBox.warning(
-                        self,
-                        "Validation Error",
-                        f"Could not validate geometry compatibility for '{assessment_layer_name}':\n{str(e)}"
-                    )
-                    continue
-
-                # Generate output table name
-                output_table = f"{target_table}_vs_{assessment_table}_analysis"
-                output_layer_name = f"{target_layer_name} vs {assessment_layer_name} (Analysis)"
-
-                # Perform analysis
-                try:
-                    progress = QProgressDialog(
-                        f"Analyzing {target_layer_name} vs {assessment_layer_name}...",
-                        "Cancel",
-                        0, 100,
-                        self
-                    )
-                    progress.setWindowTitle("Spatial Analysis")
-                    progress.setWindowModality(Qt.WindowModal)
-                    progress.setMinimumDuration(0)
-                    progress.setValue(50)
-                    QCoreApplication.processEvents()
-
-                    # Perform the analysis and create layer
-                    result = analyzer.analyze_and_create_layer(
-                        target_table,
-                        assessment_table,
-                        output_table,
-                        output_layer_name,
-                        OperationType.BOTH
-                    )
-
-                    progress.setValue(100)
-
-                    results.append({
-                        'target': target_layer_name,
-                        'assessment': assessment_layer_name,
-                        'result': result
-                    })
-
-                except Exception as e:
-                    QMessageBox.warning(
-                        self,
-                        "Analysis Error",
-                        f"Failed to analyze {target_layer_name} vs {assessment_layer_name}:\n{str(e)}"
-                    )
-                    continue
-
-            # Disconnect from database
-            db_manager.disconnect()
-
-            # Show summary of results
-            if results:
-                summary = f"Spatial analysis completed for {len(results)} layer pair(s):\n\n"
-                for r in results:
-                    res = r['result']
-                    summary += f"• {r['target']} vs {r['assessment']}:\n"
-                    summary += f"  - Total features: {res['total']}\n"
-                    summary += f"  - Intersected: {res['intersected']}\n"
-                    summary += f"  - Non-intersected: {res['non_intersected']}\n"
-                    summary += f"  - Layer created: {res['layer_name']}\n\n"
-
-                QMessageBox.information(
-                    self,
-                    "Spatial Analysis Complete",
-                    summary
-                )
-                return True
-            else:
-                QMessageBox.information(
-                    self,
-                    "Spatial Analysis",
-                    "No analysis was performed."
-                )
-                return False
-
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Analysis Error",
-                f"An error occurred during spatial analysis:\n{str(e)}"
-            )
-            return False
-
     def validate_page_1(self):
         """Validate page 1 before allowing user to proceed."""
         # Check if assessment name is provided
@@ -1070,12 +886,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             )
             return False
 
-        # Validate that Spatial Marker layers have the same geometry type as Target layer
+        # Validate that selected layers have the same geometry type as Target layer
         target_layer = None
         target_layer_name = None
-        spatial_marker_layers = []
+        assessment_layers = []
 
-        # Find the target layer and spatial marker layers
+        # Find the target layer and assessment layers
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name_item = self.tableWidget_layers.item(row, 0)
             combo = self.tableWidget_layers.cellWidget(row, 2)
@@ -1092,35 +908,35 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     if status == self.STATUS_TARGET:
                         target_layer = layer
                         target_layer_name = layer_name
-                    elif status == self.STATUS_SPATIAL_MARKER:
-                        spatial_marker_layers.append((layer_name, layer))
+                    elif status == self.STATUS_INCLUDE:
+                        assessment_layers.append((layer_name, layer))
 
-        # Check if spatial marker layers have the same geometry type as target
-        if target_layer and spatial_marker_layers:
+        # Check if assessment layers have the same geometry type as target
+        if target_layer and assessment_layers:
             if isinstance(target_layer, QgsVectorLayer):
                 target_geom_type = target_layer.geometryType()
 
-                for marker_name, marker_layer in spatial_marker_layers:
-                    if isinstance(marker_layer, QgsVectorLayer):
-                        if marker_layer.geometryType() != target_geom_type:
+                for assessment_name, assessment_layer in assessment_layers:
+                    if isinstance(assessment_layer, QgsVectorLayer):
+                        if assessment_layer.geometryType() != target_geom_type:
                             # Get human-readable geometry type names
                             target_type_name = QgsWkbTypes.displayString(target_layer.wkbType())
-                            marker_type_name = QgsWkbTypes.displayString(marker_layer.wkbType())
+                            assessment_type_name = QgsWkbTypes.displayString(assessment_layer.wkbType())
 
                             QtWidgets.QMessageBox.warning(
                                 self,
                                 "Validation Error",
-                                f"Spatial Marker layer '{marker_name}' has geometry type '{marker_type_name}', "
+                                f"Assessment layer '{assessment_name}' has geometry type '{assessment_type_name}', "
                                 f"but Target layer '{target_layer_name}' has geometry type '{target_type_name}'.\n\n"
-                                f"All Spatial Marker layers must have the same geometry type as the Target layer."
+                                f"All selected layers must have the same geometry type."
                             )
                             return False
                     else:
                         QtWidgets.QMessageBox.warning(
                             self,
                             "Validation Error",
-                            f"Spatial Marker layer '{marker_name}' is not a vector layer.\n\n"
-                            f"Only vector layers can be used as Spatial Markers."
+                            f"Assessment layer '{assessment_name}' is not a vector layer.\n\n"
+                            f"Only vector layers can be used."
                         )
                         return False
 
@@ -1453,12 +1269,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                         QgsProject.instance().addMapLayer(self.selected_features_layer)
 
         return True
-
-    def get_selected_features(self):
-        """Get the list of selected feature IDs."""
-        if self.target_layer:
-            return list(self.target_layer.selectedFeatureIds())
-        return []
 
     def _get_geometry_category(self, layer):
         """Get the geometry category for a layer (Point, Line, or Polygon).

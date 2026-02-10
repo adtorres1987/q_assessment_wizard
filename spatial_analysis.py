@@ -6,7 +6,6 @@ Creates resulting layers in QGIS memory or PostgreSQL
 
 from enum import Enum
 from qgis.core import QgsVectorLayer, QgsProject, QgsDataSourceUri, QgsWkbTypes
-import processing
 
 
 class OperationType(Enum):
@@ -82,15 +81,9 @@ class SpatialAnalyzer:
             cursor.execute(query)
             self.db_manager.connection.commit()
 
-            # Get statistics
+            # Get statistics - total count
             cursor.execute(f"SELECT COUNT(*) FROM {output_table}")
             total_count = cursor.fetchone()[0]
-
-            cursor.execute(f"SELECT COUNT(*) FROM {output_table} WHERE split_type = 'intersect'")
-            intersected_count = cursor.fetchone()[0]
-
-            cursor.execute(f"SELECT COUNT(*) FROM {output_table} WHERE split_type = 'no_overlap'")
-            non_intersected_count = cursor.fetchone()[0]
 
             # Create spatial index on output table
             self.db_manager.create_spatial_index(output_table)
@@ -101,9 +94,7 @@ class SpatialAnalyzer:
             layer = self._create_qgis_layer(output_table, layer_name)
 
             return {
-                'total': total_count,
-                'intersected': intersected_count,
-                'non_intersected': non_intersected_count,
+                'total_count': total_count,
                 'output_table': output_table,
                 'layer': layer,
                 'layer_name': layer.name() if layer else None,
@@ -487,110 +478,3 @@ class SpatialAnalyzer:
             )
 
         return " ".join(messages)
-
-
-class MemorySpatialAnalyzer:
-    """
-    Performs spatial analysis operations directly on QGIS layers
-    Creates resulting layers in memory without requiring PostgreSQL
-    """
-
-    def analyze_layers(self, target_layer, assessment_layer, output_name, operation_type=OperationType.INTERSECT):
-        """
-        Perform spatial analysis between target and assessment layers
-
-        Args:
-            target_layer: QgsVectorLayer - the target layer
-            assessment_layer: QgsVectorLayer - the assessment layer
-            output_name: str - name for the output layer
-            operation_type: OperationType - INTERSECT or UNION
-
-        Returns:
-            dict: Results including the created QgsVectorLayer and statistics
-        """
-        if not target_layer or not target_layer.isValid():
-            raise Exception("Target layer is not valid")
-
-        if not assessment_layer or not assessment_layer.isValid():
-            raise Exception("Assessment layer is not valid")
-
-        if operation_type == OperationType.INTERSECT:
-            result = self._perform_intersection(target_layer, assessment_layer, output_name)
-        elif operation_type == OperationType.UNION:
-            result = self._perform_union(target_layer, assessment_layer, output_name)
-        else:
-            raise Exception(f"Unknown operation type: {operation_type}")
-
-        return result
-
-    def _perform_intersection(self, target_layer, assessment_layer, output_name):
-        """
-        Perform intersection using QGIS processing
-
-        Args:
-            target_layer: QgsVectorLayer - the target layer
-            assessment_layer: QgsVectorLayer - the assessment layer
-            output_name: str - name for the output layer
-
-        Returns:
-            dict: Results including the created layer and statistics
-        """
-        result = processing.run("native:intersection", {
-            'INPUT': target_layer,
-            'OVERLAY': assessment_layer,
-            'INPUT_FIELDS': [],
-            'OVERLAY_FIELDS': [],
-            'OVERLAY_FIELDS_PREFIX': 'assessment_',
-            'OUTPUT': 'memory:'
-        })
-
-        output_layer = result['OUTPUT']
-
-        if output_layer and output_layer.isValid():
-            output_layer.setName(output_name)
-            QgsProject.instance().addMapLayer(output_layer)
-
-            return {
-                'success': True,
-                'layer': output_layer,
-                'layer_name': output_name,
-                'feature_count': output_layer.featureCount(),
-                'operation': 'intersect'
-            }
-        else:
-            raise Exception("Intersection operation failed")
-
-    def _perform_union(self, target_layer, assessment_layer, output_name):
-        """
-        Perform union using QGIS processing
-
-        Args:
-            target_layer: QgsVectorLayer - the target layer
-            assessment_layer: QgsVectorLayer - the assessment layer
-            output_name: str - name for the output layer
-
-        Returns:
-            dict: Results including the created layer and statistics
-        """
-        result = processing.run("native:union", {
-            'INPUT': target_layer,
-            'OVERLAY': assessment_layer,
-            'OVERLAY_FIELDS_PREFIX': 'assessment_',
-            'OUTPUT': 'memory:'
-        })
-
-        output_layer = result['OUTPUT']
-
-        if output_layer and output_layer.isValid():
-            output_layer.setName(output_name)
-            QgsProject.instance().addMapLayer(output_layer)
-
-            return {
-                'success': True,
-                'layer': output_layer,
-                'layer_name': output_name,
-                'feature_count': output_layer.featureCount(),
-                'operation': 'union'
-            }
-        else:
-            raise Exception("Union operation failed")
