@@ -33,9 +33,9 @@ from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsW
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from PyQt5.QtGui import QColor
 
-# Import database manager and spatial analysis
-from .database_manager import DatabaseManager, PSYCOPG2_AVAILABLE
-from .spatial_analysis import SpatialAnalyzer, OperationType
+# Import project manager and spatial analysis (SpatiaLite)
+from .project_manager import ProjectManager
+from .spatial_analysis_spatialite import SpatialAnalyzerLite, OperationType
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -385,7 +385,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     STATUS_SPATIAL_MARKER = "Spatial Marker"
     STATUS_DO_NOT_INCLUDE = "Do not include"
 
-    def __init__(self, parent=None, iface=None):
+    def __init__(self, parent=None, iface=None, project_id="",
+                 admin_manager=None, project_db_id=None):
         """Constructor."""
         super(QassessmentWizardDialog, self).__init__(parent)
         # Set up the user interface from Designer through FORM_CLASS.
@@ -397,6 +398,10 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Initialize variables
         self.iface = iface
+        self.project_id = project_id
+        self.admin_manager = admin_manager
+        self.project_db_id = project_db_id
+        self.wizard_results = None
         self.target_layer = None
         self.selected_features_layer = None
         self.map_canvas = None
@@ -417,6 +422,17 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Override accept to perform spatial analysis when wizard finishes."""
         # Get assessment name from page 1 (replace spaces with underscores)
         assessment_name = self.lineEdit_name.text().strip().replace(' ', '_')
+
+        # Check for duplicate assessment name within this project
+        if self.admin_manager and self.project_db_id is not None:
+            if self.admin_manager.assessment_name_exists(self.project_db_id, assessment_name):
+                QMessageBox.warning(
+                    self,
+                    "Duplicate Assessment",
+                    f"An assessment named '{assessment_name}' already exists in this project.\n\n"
+                    "Please go back and choose a different name."
+                )
+                return
 
         # Get target and assessment layers
         target_layer = None
@@ -478,8 +494,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
                 crs = target_layer.crs().authid()
 
-                # Layer name with "_simple_case" suffix
-                layer_name = f"{assessment_name}_simple_case"
+                # Layer name with project_id prefix
+                layer_name = f"{self.project_id}__{assessment_name}"
 
                 # Create new memory layer with same structure
                 memory_layer = QgsVectorLayer(
@@ -502,6 +518,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 # Close progress dialog
                 progress.close()
 
+                # Store results for the calling form
+                self.wizard_results = {
+                    'assessment_name': assessment_name,
+                    'target_layer': target_layer.name(),
+                    'assessment_layers': [],
+                    'output_tables': [layer_name],
+                    'description': self.textEdit_description.toPlainText().strip()
+                }
+
                 QMessageBox.information(
                     self,
                     "Layer Created",
@@ -509,33 +534,39 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     f"Features: {len(selected_features)}"
                 )
             else:
-                # Case 2: Target and assessment layers - perform both intersection and union using PostgreSQL
-                # Initialize database manager
-                db_manager = DatabaseManager(
-                    host="localhost",
-                    database="wizard_db",
-                    user="postgres",
-                    password="user123",
-                    port="5432"
-                )
-                db_manager.connect()
+                # Case 2: Target and assessment layers - spatial analysis via SpatiaLite
+                # Get project DB path from admin manager
+                project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
+                if not project_db_path:
+                    raise Exception("Project database path not found.")
 
-                analyzer = SpatialAnalyzer(db_manager)
+                pm = ProjectManager(project_db_path)
+                pm.connect()
+
+                # Migrate target and assessment layers to SpatiaLite if not already there
+                target_table = pm.sanitize_table_name(target_layer.name())
+                if not pm.table_exists(target_table):
+                    pm.migrate_layer(target_layer, target_table)
+
+                for al in assessment_layers:
+                    at = pm.sanitize_table_name(al.name())
+                    if not pm.table_exists(at):
+                        pm.migrate_layer(al, at)
+
+                analyzer = SpatialAnalyzerLite(pm)
                 results = []
 
                 for assessment_layer in assessment_layers:
-                    # Get table names (sanitized) for PostgreSQL
-                    target_table = db_manager.sanitize_table_name(target_layer.name())
-                    assessment_table = db_manager.sanitize_table_name(assessment_layer.name())
+                    assessment_table = pm.sanitize_table_name(assessment_layer.name())
 
-                    # Create base output name using assessment name from page 1
+                    # Create base output name using project_id and assessment name
                     if len(assessment_layers) == 1:
-                        base_name = assessment_name
+                        base_name = f"{self.project_id}__{assessment_name}"
                     else:
-                        base_name = f"{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
+                        base_name = f"{self.project_id}__{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
 
-                    # Perform Intersection using PostgreSQL
-                    output_table_intersect = db_manager.sanitize_table_name(f"{base_name}_intersection")
+                    # Perform Intersection
+                    output_table_intersect = pm.sanitize_table_name(f"{base_name}_intersection")
                     result_intersect = analyzer.analyze_and_create_layer(
                         target_table,
                         assessment_table,
@@ -545,8 +576,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     )
                     results.append(result_intersect)
 
-                    # Perform Union using PostgreSQL
-                    output_table_union = db_manager.sanitize_table_name(f"{base_name}_union")
+                    # Perform Union
+                    output_table_union = pm.sanitize_table_name(f"{base_name}_union")
                     result_union = analyzer.analyze_and_create_layer(
                         target_table,
                         assessment_table,
@@ -556,8 +587,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     )
                     results.append(result_union)
 
-                # Disconnect from database
-                db_manager.disconnect()
+                # Disconnect from project database
+                pm.disconnect()
 
                 # Close progress dialog
                 progress.close()
@@ -575,6 +606,29 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                         f"Total features: {total_features}"
                     )
 
+                # Store results for the calling form
+                self.wizard_results = {
+                    'assessment_name': assessment_name,
+                    'target_layer': target_layer.name(),
+                    'assessment_layers': [l.name() for l in assessment_layers],
+                    'output_tables': [r['layer'].name() for r in results] if results else [],
+                    'description': self.textEdit_description.toPlainText().strip()
+                }
+
+            # Record assessment in metadata database
+            if self.admin_manager and self.project_db_id is not None:
+                try:
+                    self.admin_manager.create_assessment(
+                        project_id=self.project_db_id,
+                        name=assessment_name,
+                        description=self.wizard_results.get('description', ''),
+                        target_layer=self.wizard_results.get('target_layer', ''),
+                        assessment_layers=self.wizard_results.get('assessment_layers', []),
+                        output_tables=self.wizard_results.get('output_tables', [])
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not record assessment in metadata: {e}")
+
             # Clean up and close wizard
             self.cleanup_wizard_data()
             super(QassessmentWizardDialog, self).accept()
@@ -587,6 +641,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 "Analysis Error",
                 f"Spatial analysis failed:\n{str(e)}"
             )
+
+    def get_results(self):
+        """Return the structured results after wizard completion.
+
+        Returns:
+            dict or None: Dictionary with assessment_name, target_layer,
+            assessment_layers, output_tables, description. None if cancelled.
+        """
+        return self.wizard_results
 
     def cleanup_wizard_data(self):
         """Clean up all data when wizard is cancelled or finished."""
@@ -634,17 +697,32 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.page_1.validatePage = self.validate_page_1
 
     def populate_layers(self):
-        """Populate the table widget with available layers from the QGIS project."""
+        """Populate the table widget with vector layers from the 'Base Layers' group folder."""
         self.tableWidget_layers.setRowCount(0)
 
-        # Get all layers from the current QGIS project
-        layers = QgsProject.instance().mapLayers().values()
+        # Get layers only from the "Base Layers" group folder
+        root = QgsProject.instance().layerTreeRoot()
+        base_layers_group = root.findGroup("Base Layers")
+
+        if not base_layers_group:
+            QMessageBox.warning(
+                self,
+                "Base Layers Not Found",
+                "No 'Base Layers' group folder found in the Layers panel.\n\n"
+                "Please create a group called 'Base Layers' and add your input layers to it."
+            )
+            return
+
+        # Get layers from the group
+        tree_layers = base_layers_group.findLayers()
 
         # Add each layer to the table with a status dropdown
         # Only include vector layers (raster layers cannot be used as target)
-        for layer in layers:
-            # Check if it's a vector layer
-            if not isinstance(layer, QgsVectorLayer):
+        for tree_layer in tree_layers:
+            layer = tree_layer.layer()
+
+            # Check if it's a valid vector layer
+            if not layer or not isinstance(layer, QgsVectorLayer):
                 continue
 
             row_position = self.tableWidget_layers.rowCount()
@@ -685,35 +763,27 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 if combo and combo != sender and combo.currentText() == self.STATUS_TARGET:
                     combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
 
-    def migrate_selected_layers_to_postgres(self):
-        """Migrate all selected layers (not 'Do not include') to PostgreSQL using DatabaseManager."""
-        if not PSYCOPG2_AVAILABLE:
-            QMessageBox.warning(
-                self,
-                "Database Error",
-                "psycopg2 library is not available. Please install it to use PostgreSQL migration.\n\n"
-                "Install with: pip install psycopg2-binary"
-            )
-            return False
-
+    def migrate_selected_layers_to_spatialite(self):
+        """Migrate all selected layers (not 'Do not include') to project SpatiaLite database."""
         try:
-            # Initialize database manager
-            db_manager = DatabaseManager(
-                host="localhost",
-                database="wizard_db",
-                user="postgres",
-                password="user123",
-                port="5432"
-            )
+            # Get project DB path from admin manager
+            project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
+            if not project_db_path:
+                QMessageBox.critical(
+                    self,
+                    "Database Error",
+                    "Project database path not found."
+                )
+                return False
 
-            # Connect to database
+            pm = ProjectManager(project_db_path)
             try:
-                db_manager.connect()
+                pm.connect()
             except Exception as e:
                 QMessageBox.critical(
                     self,
                     "Database Connection Error",
-                    f"Failed to connect to PostgreSQL database 'wizard_db':\n{str(e)}"
+                    f"Failed to connect to project database:\n{str(e)}"
                 )
                 return False
 
@@ -727,7 +797,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     layer_name = layer_name_item.text()
                     status = status_combo.currentText()
 
-                    # Migrate all layers except "Do not include"
                     if status != self.STATUS_DO_NOT_INCLUDE:
                         layers = QgsProject.instance().mapLayersByName(layer_name)
                         if layers and isinstance(layers[0], QgsVectorLayer):
@@ -739,22 +808,20 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     "Migration Info",
                     "No layers selected for migration."
                 )
-                db_manager.disconnect()
+                pm.disconnect()
                 return True
 
             # Check for existing tables and ask user
             existing_tables = []
             for layer_name in layers_dict.keys():
-                table_name = db_manager.sanitize_table_name(layer_name)
-                if db_manager.table_exists(table_name):
+                table_name = pm.sanitize_table_name(layer_name)
+                if pm.table_exists(table_name):
                     existing_tables.append(layer_name)
 
             if existing_tables:
-                # Build message with list of existing tables
                 tables_list = "\n".join([f"• {name}" for name in existing_tables])
                 message = f"The following tables already exist in the database:\n\n{tables_list}\n\n"
-                message += "Do you want to migrate these layers?\n\n"
-                message += "Note: Existing data will be updated if changed, or left unchanged if identical."
+                message += "Do you want to overwrite these layers?"
 
                 reply = QMessageBox.question(
                     self,
@@ -765,28 +832,25 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 )
 
                 if reply == QMessageBox.No:
-                    # Remove existing tables from migration
                     for layer_name in existing_tables:
                         del layers_dict[layer_name]
 
-                    # Check if there are still layers to migrate
                     if not layers_dict:
                         QMessageBox.information(
                             self,
                             "Migration Cancelled",
                             "No new layers to migrate."
                         )
-                        db_manager.disconnect()
+                        pm.disconnect()
                         return True
 
             # Create progress dialog
-            progress = QProgressDialog("Migrating layers to PostgreSQL...", "Cancel", 0, len(layers_dict), self)
+            progress = QProgressDialog("Migrating layers to SpatiaLite...", "Cancel", 0, len(layers_dict), self)
             progress.setWindowTitle("Database Migration")
             progress.setWindowModality(Qt.WindowModal)
             progress.setMinimumDuration(0)
             progress.setValue(0)
 
-            # Progress callback function
             def progress_callback(layer_index, total_layers, layer_name, message):
                 progress.setLabelText(message)
                 progress.setValue(layer_index)
@@ -795,14 +859,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 if progress.wasCanceled():
                     raise Exception("Migration cancelled by user")
 
-            # Migrate layers using database manager
-            all_stats = db_manager.migrate_layers(layers_dict, progress_callback)
+            all_stats = pm.migrate_layers(layers_dict, progress_callback)
 
-            # Set progress to complete
             progress.setValue(len(layers_dict))
 
             # Process results
-            total_stats = {'inserted': 0, 'updated': 0, 'unchanged': 0, 'errors': 0}
+            total_stats = {'inserted': 0, 'errors': 0}
             failed_layers = []
 
             for stats in all_stats:
@@ -810,11 +872,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     failed_layers.append(f"{stats['table_name']}: {stats['error']}")
                 else:
                     total_stats['inserted'] += stats['inserted']
-                    total_stats['updated'] += stats['updated']
-                    total_stats['unchanged'] += stats['unchanged']
                     total_stats['errors'] += stats['errors']
 
-            # Show summary
             if failed_layers:
                 QMessageBox.warning(
                     self,
@@ -822,10 +881,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     f"Some layers failed to migrate:\n\n" + "\n".join(failed_layers)
                 )
             else:
-                summary = f"Successfully migrated {len(layers_dict)} layer(s) to database 'wizard_db':\n\n"
-                summary += f"Total inserted: {total_stats['inserted']}\n"
-                summary += f"Total updated: {total_stats['updated']}\n"
-                summary += f"Total unchanged: {total_stats['unchanged']}\n"
+                summary = f"Successfully migrated {len(layers_dict)} layer(s) to SpatiaLite:\n\n"
+                summary += f"Total features inserted: {total_stats['inserted']}\n"
                 if total_stats['errors'] > 0:
                     summary += f"Total errors: {total_stats['errors']}"
 
@@ -835,7 +892,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     summary
                 )
 
-            db_manager.disconnect()
+            pm.disconnect()
             return True
 
         except Exception as e:
@@ -940,8 +997,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                         )
                         return False
 
-        # Migrate selected layers to PostgreSQL
-        if not self.migrate_selected_layers_to_postgres():
+        # Migrate selected layers to SpatiaLite
+        if not self.migrate_selected_layers_to_spatialite():
             # Migration failed, but allow user to continue
             # (they already saw the error message)
             pass

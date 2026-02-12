@@ -91,8 +91,8 @@ class DatabaseManager:
         table_name = re.sub(r'[^a-zA-Z0-9_]', '_', layer_name)
         # Convert to lowercase
         table_name = table_name.lower()
-        # Remove consecutive underscores
-        table_name = re.sub(r'_+', '_', table_name)
+        # Remove 3+ consecutive underscores (preserves __ as separator)
+        table_name = re.sub(r'_{3,}', '__', table_name)
         # Remove leading/trailing underscores
         table_name = table_name.strip('_')
         # Ensure it doesn't start with a number

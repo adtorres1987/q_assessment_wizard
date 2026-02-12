@@ -27,8 +27,8 @@ from qgis.PyQt.QtWidgets import QAction
 
 # Initialize Qt resources from file resources.py
 from .resources import *
-# Import the code for the dialog
-from .assessment_wizard_dialog import QassessmentWizardDialog
+# Import the code for the main form
+from .main_form import AssessmentMainForm
 import os.path
 
 
@@ -183,18 +183,16 @@ class QassessmentWizard:
     def run(self):
         """Run method that performs all the real work"""
 
-        # Create the dialog with elements (after translation) and keep reference
+        # Create the main form (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
         if self.first_start == True:
             self.first_start = False
-            self.dlg = QassessmentWizardDialog(iface=self.iface)
+            self.dlg = AssessmentMainForm(
+                iface=self.iface,
+                plugin_dir=self.plugin_dir,
+                parent=self.iface.mainWindow()
+            )
 
-        # show the dialog
+        # show the main form
         self.dlg.show()
-        # Run the dialog event loop
-        result = self.dlg.exec_()
-        # See if OK was pressed
-        if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
+        self.dlg.exec_()
