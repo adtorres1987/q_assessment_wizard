@@ -33,7 +33,8 @@ class SpatialAnalyzerLite:
         self.pm = project_manager
 
     def analyze_and_create_layer(self, target_table, assessment_table, output_table,
-                                 layer_name=None, operation_type=OperationType.BOTH):
+                                 layer_name=None, operation_type=OperationType.BOTH,
+                                 group_name=None):
         """
         Perform spatial analysis between target and assessment layers and create QGIS layer.
 
@@ -125,7 +126,7 @@ class SpatialAnalyzerLite:
             cursor.close()
 
             # Create QGIS layer from SpatiaLite table
-            layer = self._create_qgis_layer(output_table, layer_name)
+            layer = self._create_qgis_layer(output_table, layer_name, group_name)
 
             return {
                 'total_count': total_count,
@@ -139,13 +140,14 @@ class SpatialAnalyzerLite:
             cursor.close()
             raise Exception(f"Spatial analysis failed: {str(e)}")
 
-    def _create_qgis_layer(self, table_name, layer_name=None):
+    def _create_qgis_layer(self, table_name, layer_name=None, group_name=None):
         """
         Create a QGIS vector layer from a SpatiaLite table.
 
         Args:
             table_name: Name of the SpatiaLite table
             layer_name: Display name for the layer (defaults to table_name)
+            group_name: Optional group name to place the layer in
 
         Returns:
             QgsVectorLayer: The created layer
@@ -159,7 +161,16 @@ class SpatialAnalyzerLite:
         if not layer.isValid():
             raise Exception(f"Failed to create QGIS layer from table '{table_name}'")
 
-        QgsProject.instance().addMapLayer(layer)
+        if group_name:
+            root = QgsProject.instance().layerTreeRoot()
+            group = root.findGroup(group_name)
+            if not group:
+                group = root.addGroup(group_name)
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
+        else:
+            QgsProject.instance().addMapLayer(layer)
+
         return layer
 
     # ------------------------------------------------------------------ #

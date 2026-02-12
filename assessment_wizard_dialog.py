@@ -26,356 +26,25 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtWidgets import QComboBox, QTableWidgetItem, QToolBar, QPushButton, QVBoxLayout, QMessageBox, QProgressDialog
+from qgis.PyQt.QtWidgets import (QComboBox, QTableWidgetItem, QToolBar,
+                                  QPushButton, QVBoxLayout, QMessageBox,
+                                  QProgressDialog)
 from qgis.PyQt.QtCore import Qt, QSize, QCoreApplication
-from qgis.core import (QgsProject, QgsVectorLayer, QgsPointXY, QgsGeometry, QgsWkbTypes, QgsRectangle,
-                       QgsRasterLayer, QgsCoordinateReferenceSystem, QgsCoordinateTransform)
-from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
-from PyQt5.QtGui import QColor
+from qgis.core import (QgsProject, QgsVectorLayer, QgsWkbTypes,
+                       QgsRasterLayer, QgsCoordinateReferenceSystem)
+from qgis.gui import QgsMapCanvas, QgsMapToolPan
 
-# Import project manager and spatial analysis (SpatiaLite)
-from .project_manager import ProjectManager
-from .spatial_analysis_spatialite import SpatialAnalyzerLite, OperationType
+# Extracted modules (SOLID refactoring)
+from .map_tools import FeatureSelectionTool, RectangleSelectTool
+from .geometry_utils import (transform_extent_to_canvas_crs,
+                              get_assessment_summary)
+from .layer_migration import LayerMigrationService
+from .assessment_executor import AssessmentExecutor
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'assessment_wizard_dialog_base.ui'))
-
-
-class FeatureSelectionTool(QgsMapTool):
-    """Custom map tool for selecting features by clicking."""
-
-    def __init__(self, canvas, layer, selection_callback):
-        """Initialize the feature selection tool.
-
-        Args:
-            canvas: QgsMapCanvas - The map canvas
-            layer: QgsVectorLayer - The layer to select features from
-            selection_callback: callable - Function to call when selection changes
-        """
-        super(FeatureSelectionTool, self).__init__(canvas)
-        self.layer = layer
-        self.selection_callback = selection_callback
-        self.setCursor(Qt.CrossCursor)
-    
-    def create_layer_from_feature_id(self, source_layer, feature_ids):
-        """Create a new memory layer from selected feature IDs.
-
-        Args:
-            source_layer: QgsVectorLayer - The source layer
-            feature_ids: list - List of feature IDs to copy
-
-        Returns:
-            QgsVectorLayer - New memory layer with selected features
-        """
-        from qgis.core import QgsWkbTypes
-
-        # Commented out - Old code not needed for memory layer creation
-        # request = QgsFeatureRequest().setFilterFid(feature_ids)
-        # safe_options = QgsVectorFileWriter.SaveVectorOptions()
-        # safe_options.driverName = "SQLite"
-        # safe_options.layerName = table_name
-        # safe_options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-        # safe_options.fileEncoding = "UTF-8"
-        # safe_options.datasourceOptions = ["SPATIALITE=YES"]
-        
-        # Get layer properties
-        geometry_type = source_layer.geometryType()
-        crs = source_layer.crs().authid()
-        layer_name = f"{source_layer.name()}_selection"
-
-        # Create new memory layer with proper URI format
-        new_layer = QgsVectorLayer(f"{QgsWkbTypes.displayString(source_layer.wkbType())}?crs={crs}", layer_name, "memory")
-
-        # Verify layer was created successfully
-        if not new_layer.isValid():
-            return None
-
-        # Copy fields from source layer
-        new_layer.dataProvider().addAttributes(source_layer.fields())
-        new_layer.updateFields()
-
-        # Copy features from source layer
-        features = []
-        for fid in feature_ids:
-            feature = source_layer.getFeature(fid)
-            if feature.isValid():
-                features.append(feature)
-
-        # Add features to new layer
-        if features:
-            new_layer.dataProvider().addFeatures(features)
-            new_layer.updateExtents()
-
-        return new_layer
-
-    def canvasReleaseEvent(self, event):
-        """Handle mouse click on the map canvas with CRS transformation."""
-        from qgis.core import QgsFeatureRequest
-
-        # Get the click point in map coordinates
-        point = self.toMapCoordinates(event.pos())
-
-        # Calculate search tolerance based on map scale (5 pixels)
-        search_radius = self.canvas().mapUnitsPerPixel() * 5
-
-        # Transform point to layer CRS if needed
-        layer_point = point
-        layer_search_radius = search_radius
-
-        if self.canvas().mapSettings().destinationCrs() != self.layer.crs():
-            transform = QgsCoordinateTransform(
-                self.canvas().mapSettings().destinationCrs(),
-                self.layer.crs(),
-                QgsProject.instance()
-            )
-            layer_point = transform.transform(point)
-
-            # Transform the search radius (approximate)
-            # Create a small rectangle and transform it to get the transformed radius
-            test_point = QgsPointXY(point.x() + search_radius, point.y())
-            transformed_test = transform.transform(test_point)
-            layer_search_radius = layer_point.distance(transformed_test)
-
-        # Create a point geometry for distance calculation in layer CRS
-        point_geom = QgsGeometry.fromPointXY(QgsPointXY(layer_point))
-
-        # Create search rectangle for efficient spatial filtering
-        search_rect = QgsRectangle(
-            layer_point.x() - layer_search_radius,
-            layer_point.y() - layer_search_radius,
-            layer_point.x() + layer_search_radius,
-            layer_point.y() + layer_search_radius
-        )
-
-        # Use spatial filter for efficient querying
-        request = QgsFeatureRequest()
-        request.setFilterRect(search_rect)
-
-        # Find features and calculate distances in layer CRS
-        candidates = []
-        for feature in self.layer.getFeatures(request):
-            geom = feature.geometry()
-            if geom and not geom.isNull():
-                distance = geom.distance(point_geom)
-                if distance <= layer_search_radius:
-                    candidates.append((feature.id(), distance))
-
-        # Sort by distance to get the closest feature
-        candidates.sort(key=lambda x: x[1])
-
-        if candidates:
-            # Get current selection
-            selected_ids = set(self.layer.selectedFeatureIds())
-
-            # Toggle selection for the closest feature
-            clicked_id = candidates[0][0]
-            if clicked_id in selected_ids:
-                selected_ids.discard(clicked_id)
-            else:
-                selected_ids.add(clicked_id)
-
-            # Update layer selection
-            self.layer.selectByIds(list(selected_ids))
-
-            # Refresh canvas to show selection
-            self.canvas().refresh()
-
-            # Trigger callback to update UI
-            if self.selection_callback:
-                self.selection_callback()
-
-
-class RectangleSelectTool(QgsMapTool):
-    """Custom map tool for selecting features with a rectangle."""
-
-    def __init__(self, canvas, target_layer=None, selection_callback=None):
-        """Initialize the rectangle selection tool.
-
-        Args:
-            canvas: QgsMapCanvas - The map canvas
-            target_layer: QgsVectorLayer - The layer to select features from (optional)
-            selection_callback: callable - Function to call when selection changes
-        """
-        super(RectangleSelectTool, self).__init__(canvas)
-        self.canvas = canvas
-        self.target_layer = target_layer
-        self.selection_callback = selection_callback
-        self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        self.rubber_band.setColor(QColor(255, 0, 0, 100))  # Semi-transparent red
-        self.rubber_band.setWidth(2)
-        self.start_point = None
-        self.end_point = None
-        self.setCursor(Qt.CrossCursor)
-
-    def canvasPressEvent(self, event):
-        """Handle mouse press event."""
-        if event.button() == Qt.LeftButton:
-            self.start_point = self.toMapCoordinates(event.pos())
-            self.end_point = self.start_point
-            self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-
-    def canvasMoveEvent(self, event):
-        """Handle mouse move event to update rubber band."""
-        if self.start_point is None:
-            return
-        self.end_point = self.toMapCoordinates(event.pos())
-        self.update_rubber_band()
-
-    def canvasReleaseEvent(self, event):
-        """Handle mouse release event to select features (rectangle or point)."""
-        if event.button() != Qt.LeftButton or self.start_point is None:
-            return
-
-        self.end_point = self.toMapCoordinates(event.pos())
-        self.update_rubber_band()
-
-        # Create rectangle from start and end points
-        rect = QgsRectangle(self.start_point, self.end_point)
-
-        # Check if this is a single click (point selection) or a rectangle drag
-        is_single_click = rect.isEmpty() or (
-            abs(self.start_point.x() - self.end_point.x()) < self.canvas.mapUnitsPerPixel() * 3 and
-            abs(self.start_point.y() - self.end_point.y()) < self.canvas.mapUnitsPerPixel() * 3
-        )
-
-        from qgis.core import QgsFeatureRequest
-
-        additive = event.modifiers() & Qt.ShiftModifier  # Hold Shift to add to selection
-
-        # Use target layer if specified, otherwise use all visible vector layers
-        if self.target_layer:
-            layers = [self.target_layer]
-        else:
-            layers = [layer for layer in self.canvas.layers()
-                     if isinstance(layer, QgsVectorLayer)]
-
-        for layer in layers:
-            if not layer or not isinstance(layer, QgsVectorLayer):
-                continue
-
-            if is_single_click:
-                # Handle point selection
-                point = self.end_point
-                search_radius = self.canvas.mapUnitsPerPixel() * 5
-
-                # Transform point to layer CRS if needed
-                layer_point = point
-                layer_search_radius = search_radius
-
-                if self.canvas.mapSettings().destinationCrs() != layer.crs():
-                    transform = QgsCoordinateTransform(
-                        self.canvas.mapSettings().destinationCrs(),
-                        layer.crs(),
-                        QgsProject.instance()
-                    )
-                    layer_point = transform.transform(point)
-                    test_point = QgsPointXY(point.x() + search_radius, point.y())
-                    transformed_test = transform.transform(test_point)
-                    layer_search_radius = layer_point.distance(transformed_test)
-
-                # Create search rectangle for point selection
-                point_geom = QgsGeometry.fromPointXY(QgsPointXY(layer_point))
-                search_rect = QgsRectangle(
-                    layer_point.x() - layer_search_radius,
-                    layer_point.y() - layer_search_radius,
-                    layer_point.x() + layer_search_radius,
-                    layer_point.y() + layer_search_radius
-                )
-
-                # Find closest feature
-                request = QgsFeatureRequest()
-                request.setFilterRect(search_rect)
-
-                candidates = []
-                for feature in layer.getFeatures(request):
-                    geom = feature.geometry()
-                    if geom and not geom.isNull():
-                        distance = geom.distance(point_geom)
-                        if distance <= layer_search_radius:
-                            candidates.append((feature.id(), distance))
-
-                candidates.sort(key=lambda x: x[1])
-
-                if candidates:
-                    # Always add to selection for point clicks (additive behavior)
-                    existing_ids = set(layer.selectedFeatureIds())
-                    clicked_id = candidates[0][0]
-
-                    # Toggle: if already selected, remove it; otherwise add it
-                    if clicked_id in existing_ids:
-                        existing_ids.discard(clicked_id)
-                    else:
-                        existing_ids.add(clicked_id)
-
-                    layer.selectByIds(list(existing_ids))
-            else:
-                # Handle rectangle selection
-                # Transform rectangle to layer CRS if needed
-                layer_rect = rect
-                if self.canvas.mapSettings().destinationCrs() != layer.crs():
-                    transform = QgsCoordinateTransform(
-                        self.canvas.mapSettings().destinationCrs(),
-                        layer.crs(),
-                        QgsProject.instance()
-                    )
-                    layer_rect = transform.transformBoundingBox(rect)
-
-                # Create feature request with rectangle filter in layer CRS
-                request = QgsFeatureRequest()
-                request.setFilterRect(layer_rect)
-
-                # Get feature IDs that intersect with the rectangle
-                rect_geom = QgsGeometry.fromRect(layer_rect)
-                new_feature_ids = []
-
-                for feature in layer.getFeatures(request):
-                    if feature.geometry() and feature.geometry().intersects(rect_geom):
-                        new_feature_ids.append(feature.id())
-
-                if additive:
-                    # Shift pressed: Add to existing selection
-                    existing_ids = set(layer.selectedFeatureIds())
-                    for fid in new_feature_ids:
-                        if fid not in existing_ids:
-                            existing_ids.add(fid)
-                    layer.selectByIds(list(existing_ids))
-                else:
-                    # Shift not pressed: Replace selection
-                    layer.selectByIds(new_feature_ids)
-
-        # Reset tool
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-        self.start_point = None
-        self.end_point = None
-
-        # Refresh canvas to show selection
-        self.canvas.refresh()
-
-        # Trigger callback to update UI after refresh
-        if self.selection_callback:
-            self.selection_callback()
-
-    def update_rubber_band(self):
-        """Update the rubber band rectangle visualization."""
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-        if self.start_point and self.end_point:
-            # Create rectangle points
-            points = [
-                self.start_point,
-                QgsPointXY(self.start_point.x(), self.end_point.y()),
-                self.end_point,
-                QgsPointXY(self.end_point.x(), self.start_point.y())
-            ]
-            for i, point in enumerate(points):
-                self.rubber_band.addPoint(point, True if i == len(points) - 1 else False)
-            self.rubber_band.show()
-
-    def deactivate(self):
-        """Clean up when tool is deactivated."""
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-        super(RectangleSelectTool, self).deactivate()
 
 
 class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
@@ -389,11 +58,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                  admin_manager=None, project_db_id=None):
         """Constructor."""
         super(QassessmentWizardDialog, self).__init__(parent)
-        # Set up the user interface from Designer through FORM_CLASS.
-        # After self.setupUi() you can access any designer object by doing
-        # self.<objectname>, and you can use autoconnect slots - see
-        # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
-        # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
 
         # Initialize variables
@@ -413,28 +77,49 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.initialize_page_2()
         self.initialize_page_3()
 
-    def reject(self):
-        """Override reject to clean up when user cancels the wizard."""
-        self.cleanup_wizard_data()
-        super(QassessmentWizardDialog, self).reject()
+    # ------------------------------------------------------------------ #
+    #  Status constants helper
+    # ------------------------------------------------------------------ #
 
-    def accept(self):
-        """Override accept to perform spatial analysis when wizard finishes."""
-        # Get assessment name from page 1 (replace spaces with underscores)
-        assessment_name = self.lineEdit_name.text().strip().replace(' ', '_')
+    def _status_constants(self):
+        """Return status constants as a dict for external modules."""
+        return {
+            'STATUS_TARGET': self.STATUS_TARGET,
+            'STATUS_INCLUDE': self.STATUS_INCLUDE,
+            'STATUS_SPATIAL_MARKER': self.STATUS_SPATIAL_MARKER,
+            'STATUS_DO_NOT_INCLUDE': self.STATUS_DO_NOT_INCLUDE,
+        }
 
-        # Check for duplicate assessment name within this project
-        if self.admin_manager and self.project_db_id is not None:
-            if self.admin_manager.assessment_name_exists(self.project_db_id, assessment_name):
-                QMessageBox.warning(
-                    self,
-                    "Duplicate Assessment",
-                    f"An assessment named '{assessment_name}' already exists in this project.\n\n"
-                    "Please go back and choose a different name."
-                )
-                return
+    # ------------------------------------------------------------------ #
+    #  Layer collection helpers
+    # ------------------------------------------------------------------ #
 
-        # Get target and assessment layers
+    def _collect_selected_layers(self):
+        """Collect layers that are not 'Do not include' from the table widget.
+
+        Returns:
+            dict: {layer_name: QgsVectorLayer}
+        """
+        layers_dict = {}
+        for row in range(self.tableWidget_layers.rowCount()):
+            layer_name_item = self.tableWidget_layers.item(row, 0)
+            status_combo = self.tableWidget_layers.cellWidget(row, 2)
+
+            if layer_name_item and status_combo:
+                if status_combo.currentText() != self.STATUS_DO_NOT_INCLUDE:
+                    layer_name = layer_name_item.text()
+                    layers = QgsProject.instance().mapLayersByName(layer_name)
+                    if layers and isinstance(layers[0], QgsVectorLayer):
+                        layers_dict[layer_name] = layers[0]
+        return layers_dict
+
+    def _collect_target_and_assessment_layers(self):
+        """Read table widget to find target and assessment layers.
+
+        Returns:
+            tuple: (target_layer: QgsVectorLayer or None,
+                    assessment_layers: list[QgsVectorLayer])
+        """
         target_layer = None
         assessment_layers = []
 
@@ -453,7 +138,38 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     elif status == self.STATUS_INCLUDE:
                         assessment_layers.append(layers[0])
 
-        # Check if we have a target layer
+        return target_layer, assessment_layers
+
+    # ------------------------------------------------------------------ #
+    #  Wizard lifecycle
+    # ------------------------------------------------------------------ #
+
+    def reject(self):
+        """Override reject to clean up when user cancels the wizard."""
+        self.cleanup_wizard_data()
+        super(QassessmentWizardDialog, self).reject()
+
+    def accept(self):
+        """Override accept to perform spatial analysis when wizard finishes."""
+        assessment_name = self.lineEdit_name.text().strip().replace(' ', '_')
+        description = self.textEdit_description.toPlainText().strip()
+
+        executor = AssessmentExecutor(
+            self.project_id, self.admin_manager, self.project_db_id
+        )
+
+        # Validate name uniqueness
+        if not executor.validate_assessment_name(assessment_name):
+            QMessageBox.warning(
+                self,
+                "Duplicate Assessment",
+                f"An assessment named '{assessment_name}' already exists in this project.\n\n"
+                "Please go back and choose a different name."
+            )
+            return
+
+        # Gather layers from table widget
+        target_layer, assessment_layers = self._collect_target_and_assessment_layers()
         if not target_layer:
             QMessageBox.warning(
                 self,
@@ -466,9 +182,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             # Show progress dialog
             progress = QProgressDialog(
                 "Operation and analysis in progress...",
-                None,  # No cancel button
-                0, 0,  # Indeterminate progress
-                self
+                None, 0, 0, self
             )
             progress.setWindowTitle("Processing")
             progress.setWindowModality(Qt.WindowModal)
@@ -476,165 +190,26 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             progress.show()
             QCoreApplication.processEvents()
 
-            # Case 1: Only target layer selected - create layer with selected features only
+            # Execute appropriate workflow
             if not assessment_layers:
-                # Get selected features from target layer
-                selected_features = list(target_layer.selectedFeatures())
-
-                if not selected_features:
-                    progress.close()
-                    QMessageBox.warning(
-                        self,
-                        "No Features Selected",
-                        "No features are selected in the target layer. Please select features in Page 2."
-                    )
-                    return
-
-                # Create memory layer with selected features
-                geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
-                crs = target_layer.crs().authid()
-
-                # Layer name with project_id prefix
-                layer_name = f"{self.project_id}__{assessment_name}"
-
-                # Create new memory layer with same structure
-                memory_layer = QgsVectorLayer(
-                    f"{geom_type}?crs={crs}",
-                    layer_name,
-                    "memory"
-                )
-
-                # Copy fields from source layer
-                memory_layer.dataProvider().addAttributes(target_layer.fields().toList())
-                memory_layer.updateFields()
-
-                # Add selected features
-                memory_layer.dataProvider().addFeatures(selected_features)
-                memory_layer.updateExtents()
-
-                # Add layer to project
-                QgsProject.instance().addMapLayer(memory_layer)
-
-                # Close progress dialog
-                progress.close()
-
-                # Store results for the calling form
-                self.wizard_results = {
-                    'assessment_name': assessment_name,
-                    'target_layer': target_layer.name(),
-                    'assessment_layers': [],
-                    'output_tables': [layer_name],
-                    'description': self.textEdit_description.toPlainText().strip()
-                }
-
-                QMessageBox.information(
-                    self,
-                    "Layer Created",
-                    f"Layer '{layer_name}' created successfully!\n\n"
-                    f"Features: {len(selected_features)}"
+                self.wizard_results = executor.execute_simple_assessment(
+                    assessment_name, target_layer, description,
+                    parent_widget=self
                 )
             else:
-                # Case 2: Target and assessment layers - spatial analysis via SpatiaLite
-                # Get project DB path from admin manager
-                project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
-                if not project_db_path:
-                    raise Exception("Project database path not found.")
+                self.wizard_results = executor.execute_spatial_assessment(
+                    assessment_name, target_layer, assessment_layers,
+                    description, parent_widget=self
+                )
 
-                pm = ProjectManager(project_db_path)
-                pm.connect()
+            progress.close()
 
-                # Migrate target and assessment layers to SpatiaLite if not already there
-                target_table = pm.sanitize_table_name(target_layer.name())
-                if not pm.table_exists(target_table):
-                    pm.migrate_layer(target_layer, target_table)
-
-                for al in assessment_layers:
-                    at = pm.sanitize_table_name(al.name())
-                    if not pm.table_exists(at):
-                        pm.migrate_layer(al, at)
-
-                analyzer = SpatialAnalyzerLite(pm)
-                results = []
-
-                for assessment_layer in assessment_layers:
-                    assessment_table = pm.sanitize_table_name(assessment_layer.name())
-
-                    # Create base output name using project_id and assessment name
-                    if len(assessment_layers) == 1:
-                        base_name = f"{self.project_id}__{assessment_name}"
-                    else:
-                        base_name = f"{self.project_id}__{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
-
-                    # Perform Intersection
-                    output_table_intersect = pm.sanitize_table_name(f"{base_name}_intersection")
-                    result_intersect = analyzer.analyze_and_create_layer(
-                        target_table,
-                        assessment_table,
-                        output_table_intersect,
-                        layer_name=f"{base_name}_intersection",
-                        operation_type=OperationType.INTERSECT
-                    )
-                    results.append(result_intersect)
-
-                    # Perform Union
-                    output_table_union = pm.sanitize_table_name(f"{base_name}_union")
-                    result_union = analyzer.analyze_and_create_layer(
-                        target_table,
-                        assessment_table,
-                        output_table_union,
-                        layer_name=f"{base_name}_union",
-                        operation_type=OperationType.UNION
-                    )
-                    results.append(result_union)
-
-                # Disconnect from project database
-                pm.disconnect()
-
-                # Close progress dialog
-                progress.close()
-
-                # Show success message
-                if results:
-                    total_features = sum(r['total_count'] for r in results)
-                    layer_names = "\n• ".join(r['layer'].name() for r in results)
-
-                    QMessageBox.information(
-                        self,
-                        "Analysis Complete",
-                        f"Spatial analysis completed successfully!\n\n"
-                        f"Created layer(s):\n• {layer_names}\n\n"
-                        f"Total features: {total_features}"
-                    )
-
-                # Store results for the calling form
-                self.wizard_results = {
-                    'assessment_name': assessment_name,
-                    'target_layer': target_layer.name(),
-                    'assessment_layers': [l.name() for l in assessment_layers],
-                    'output_tables': [r['layer'].name() for r in results] if results else [],
-                    'description': self.textEdit_description.toPlainText().strip()
-                }
-
-            # Record assessment in metadata database
-            if self.admin_manager and self.project_db_id is not None:
-                try:
-                    self.admin_manager.create_assessment(
-                        project_id=self.project_db_id,
-                        name=assessment_name,
-                        description=self.wizard_results.get('description', ''),
-                        target_layer=self.wizard_results.get('target_layer', ''),
-                        assessment_layers=self.wizard_results.get('assessment_layers', []),
-                        output_tables=self.wizard_results.get('output_tables', [])
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not record assessment in metadata: {e}")
-
-            # Clean up and close wizard
-            self.cleanup_wizard_data()
-            super(QassessmentWizardDialog, self).accept()
+            if self.wizard_results:
+                executor.record_assessment(self.wizard_results)
+                self.cleanup_wizard_data()
+                super(QassessmentWizardDialog, self).accept()
 
         except Exception as e:
-            # Close progress dialog on error
             progress.close()
             QMessageBox.critical(
                 self,
@@ -643,64 +218,47 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             )
 
     def get_results(self):
-        """Return the structured results after wizard completion.
-
-        Returns:
-            dict or None: Dictionary with assessment_name, target_layer,
-            assessment_layers, output_tables, description. None if cancelled.
-        """
+        """Return the structured results after wizard completion."""
         return self.wizard_results
 
     def cleanup_wizard_data(self):
         """Clean up all data when wizard is cancelled or finished."""
-        # Remove the selected features layer from project if it exists
         try:
             if self.selected_features_layer:
                 QgsProject.instance().removeMapLayer(self.selected_features_layer.id())
                 self.selected_features_layer = None
         except (RuntimeError, AttributeError):
-            # Layer was already deleted or doesn't exist
             pass
 
-        # Clear selection on target layer
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             try:
                 self.target_layer.removeSelection()
             except (RuntimeError, AttributeError):
                 pass
 
-        # Clear page 1 inputs
         self.lineEdit_name.clear()
         self.textEdit_description.clear()
 
-        # Reset all layer status combos to "Do not include"
         for row in range(self.tableWidget_layers.rowCount()):
             combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo:
                 combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
 
-        # Reset internal references
         self.target_layer = None
+
+    # ------------------------------------------------------------------ #
+    #  Page 1: Assessment configuration
+    # ------------------------------------------------------------------ #
 
     def initialize_page_1(self):
         """Initialize the first wizard page."""
-        # Page 1 contains name and description fields
-        # Access them using:
-        # - self.lineEdit_name
-        # - self.textEdit_description
-        # - self.tableWidget_layers
-
-        # Populate the layer table with available layers from QGIS
         self.populate_layers()
-
-        # Set up page validation
         self.page_1.validatePage = self.validate_page_1
 
     def populate_layers(self):
         """Populate the table widget with vector layers from the 'Base Layers' group folder."""
         self.tableWidget_layers.setRowCount(0)
 
-        # Get layers only from the "Base Layers" group folder
         root = QgsProject.instance().layerTreeRoot()
         base_layers_group = root.findGroup("Base Layers")
 
@@ -713,15 +271,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             )
             return
 
-        # Get layers from the group
         tree_layers = base_layers_group.findLayers()
 
-        # Add each layer to the table with a status dropdown
-        # Only include vector layers (raster layers cannot be used as target)
         for tree_layer in tree_layers:
             layer = tree_layer.layer()
 
-            # Check if it's a valid vector layer
             if not layer or not isinstance(layer, QgsVectorLayer):
                 continue
 
@@ -748,171 +302,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             status_combo.currentTextChanged.connect(self.on_status_changed)
             self.tableWidget_layers.setCellWidget(row_position, 2, status_combo)
 
-        # Resize columns to fit content
         self.tableWidget_layers.resizeColumnsToContents()
 
     def on_status_changed(self, text):
         """Handle status change to ensure only one layer is set as Target."""
         if text == self.STATUS_TARGET:
-            # Get the sender combo box
             sender = self.sender()
-
-            # Find all combo boxes and reset any other "Include as Target" to "Do not include"
             for row in range(self.tableWidget_layers.rowCount()):
                 combo = self.tableWidget_layers.cellWidget(row, 2)
                 if combo and combo != sender and combo.currentText() == self.STATUS_TARGET:
                     combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
 
-    def migrate_selected_layers_to_spatialite(self):
-        """Migrate all selected layers (not 'Do not include') to project SpatiaLite database."""
-        try:
-            # Get project DB path from admin manager
-            project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
-            if not project_db_path:
-                QMessageBox.critical(
-                    self,
-                    "Database Error",
-                    "Project database path not found."
-                )
-                return False
-
-            pm = ProjectManager(project_db_path)
-            try:
-                pm.connect()
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Database Connection Error",
-                    f"Failed to connect to project database:\n{str(e)}"
-                )
-                return False
-
-            # Collect layers to migrate
-            layers_dict = {}
-            for row in range(self.tableWidget_layers.rowCount()):
-                layer_name_item = self.tableWidget_layers.item(row, 0)
-                status_combo = self.tableWidget_layers.cellWidget(row, 2)
-
-                if layer_name_item and status_combo:
-                    layer_name = layer_name_item.text()
-                    status = status_combo.currentText()
-
-                    if status != self.STATUS_DO_NOT_INCLUDE:
-                        layers = QgsProject.instance().mapLayersByName(layer_name)
-                        if layers and isinstance(layers[0], QgsVectorLayer):
-                            layers_dict[layer_name] = layers[0]
-
-            if not layers_dict:
-                QMessageBox.information(
-                    self,
-                    "Migration Info",
-                    "No layers selected for migration."
-                )
-                pm.disconnect()
-                return True
-
-            # Check for existing tables and ask user
-            existing_tables = []
-            for layer_name in layers_dict.keys():
-                table_name = pm.sanitize_table_name(layer_name)
-                if pm.table_exists(table_name):
-                    existing_tables.append(layer_name)
-
-            if existing_tables:
-                tables_list = "\n".join([f"• {name}" for name in existing_tables])
-                message = f"The following tables already exist in the database:\n\n{tables_list}\n\n"
-                message += "Do you want to overwrite these layers?"
-
-                reply = QMessageBox.question(
-                    self,
-                    "Tables Already Exist",
-                    message,
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
-                )
-
-                if reply == QMessageBox.No:
-                    for layer_name in existing_tables:
-                        del layers_dict[layer_name]
-
-                    if not layers_dict:
-                        QMessageBox.information(
-                            self,
-                            "Migration Cancelled",
-                            "No new layers to migrate."
-                        )
-                        pm.disconnect()
-                        return True
-
-            # Create progress dialog
-            progress = QProgressDialog("Migrating layers to SpatiaLite...", "Cancel", 0, len(layers_dict), self)
-            progress.setWindowTitle("Database Migration")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-
-            def progress_callback(layer_index, total_layers, layer_name, message):
-                progress.setLabelText(message)
-                progress.setValue(layer_index)
-                QCoreApplication.processEvents()
-
-                if progress.wasCanceled():
-                    raise Exception("Migration cancelled by user")
-
-            all_stats = pm.migrate_layers(layers_dict, progress_callback)
-
-            progress.setValue(len(layers_dict))
-
-            # Process results
-            total_stats = {'inserted': 0, 'errors': 0}
-            failed_layers = []
-
-            for stats in all_stats:
-                if 'error' in stats:
-                    failed_layers.append(f"{stats['table_name']}: {stats['error']}")
-                else:
-                    total_stats['inserted'] += stats['inserted']
-                    total_stats['errors'] += stats['errors']
-
-            if failed_layers:
-                QMessageBox.warning(
-                    self,
-                    "Migration Completed with Errors",
-                    f"Some layers failed to migrate:\n\n" + "\n".join(failed_layers)
-                )
-            else:
-                summary = f"Successfully migrated {len(layers_dict)} layer(s) to SpatiaLite:\n\n"
-                summary += f"Total features inserted: {total_stats['inserted']}\n"
-                if total_stats['errors'] > 0:
-                    summary += f"Total errors: {total_stats['errors']}"
-
-                QMessageBox.information(
-                    self,
-                    "Migration Successful",
-                    summary
-                )
-
-            pm.disconnect()
-            return True
-
-        except Exception as e:
-            if 'cancelled by user' in str(e).lower():
-                QMessageBox.information(
-                    self,
-                    "Migration Cancelled",
-                    "Migration cancelled by user."
-                )
-            else:
-                QMessageBox.critical(
-                    self,
-                    "Migration Error",
-                    f"An error occurred during migration:\n{str(e)}"
-                )
-            return False
-
     def validate_page_1(self):
         """Validate page 1 before allowing user to proceed."""
-        # Check if assessment name is provided
         if not self.lineEdit_name.text().strip():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -921,7 +323,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             )
             return False
 
-        # Check if exactly one layer is set as "Include as Target"
+        # Check if exactly one layer is set as Target
         target_count = 0
         for row in range(self.tableWidget_layers.rowCount()):
             combo = self.tableWidget_layers.cellWidget(row, 2)
@@ -943,12 +345,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             )
             return False
 
-        # Validate that selected layers have the same geometry type as Target layer
+        # Validate geometry types match
         target_layer = None
         target_layer_name = None
         assessment_layers = []
 
-        # Find the target layer and assessment layers
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name_item = self.tableWidget_layers.item(row, 0)
             combo = self.tableWidget_layers.cellWidget(row, 2)
@@ -957,18 +358,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 layer_name = layer_name_item.text()
                 status = combo.currentText()
 
-                # Get the actual layer from QGIS project
                 layers = QgsProject.instance().mapLayersByName(layer_name)
                 if layers:
                     layer = layers[0]
-
                     if status == self.STATUS_TARGET:
                         target_layer = layer
                         target_layer_name = layer_name
                     elif status == self.STATUS_INCLUDE:
                         assessment_layers.append((layer_name, layer))
 
-        # Check if assessment layers have the same geometry type as target
         if target_layer and assessment_layers:
             if isinstance(target_layer, QgsVectorLayer):
                 target_geom_type = target_layer.geometryType()
@@ -976,7 +374,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 for assessment_name, assessment_layer in assessment_layers:
                     if isinstance(assessment_layer, QgsVectorLayer):
                         if assessment_layer.geometryType() != target_geom_type:
-                            # Get human-readable geometry type names
                             target_type_name = QgsWkbTypes.displayString(target_layer.wkbType())
                             assessment_type_name = QgsWkbTypes.displayString(assessment_layer.wkbType())
 
@@ -998,10 +395,10 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                         return False
 
         # Migrate selected layers to SpatiaLite
-        if not self.migrate_selected_layers_to_spatialite():
-            # Migration failed, but allow user to continue
-            # (they already saw the error message)
-            pass
+        migration_service = LayerMigrationService(self.admin_manager, self.project_db_id)
+        layers_dict = self._collect_selected_layers()
+        if not migration_service.migrate_selected_layers(layers_dict, parent_widget=self):
+            pass  # Migration failed, but allow user to continue
 
         return True
 
@@ -1020,16 +417,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         return configurations
 
+    # ------------------------------------------------------------------ #
+    #  Page 2: Feature selection
+    # ------------------------------------------------------------------ #
+
     def initialize_page_2(self):
         """Initialize the second wizard page."""
-        # Connect page entered signal to setup the map
         self.currentIdChanged.connect(self.on_page_changed)
-
-        # Connect selection buttons
         self.pushButton_select_all.clicked.connect(self.select_all_features)
         self.pushButton_clear_selection.clicked.connect(self.clear_selection)
-
-        # Set up page validation
         self.page_2.validatePage = self.validate_page_2
 
     def on_page_changed(self):
@@ -1041,41 +437,32 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
     def setup_page_2(self):
         """Setup page 2 with the target layer and map canvas."""
-        # Save current selection if target layer already exists (user is coming back from page 3)
         saved_selection = None
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             saved_selection = list(self.target_layer.selectedFeatureIds())
 
-        # Get the target layer from page 1
         self.target_layer = self.get_target_layer()
 
         if not self.target_layer:
             QtWidgets.QMessageBox.warning(
-                self,
-                "Error",
+                self, "Error",
                 "No target layer found. Please go back and select a target layer."
             )
             return
 
-        # Verify it's a vector layer
         if not isinstance(self.target_layer, QgsVectorLayer):
             QtWidgets.QMessageBox.warning(
-                self,
-                "Error",
+                self, "Error",
                 "The target layer must be a vector layer. Raster layers are not supported."
             )
             return
 
-        # Update the label with target layer name
         self.label_target_layer_name.setText(f"Target Layer: {self.target_layer.name()}")
 
         # Create map canvas if it doesn't exist
         if not self.map_canvas:
-            # Use map_canvas_container as parent for proper layout
             self.map_canvas = QgsMapCanvas(self.map_canvas_container)
             self.map_canvas.setCanvasColor(Qt.white)
-
-            # Set size for the canvas
             self.map_canvas.setMinimumSize(400, 400)
             self.map_canvas.resize(800, 600)
 
@@ -1083,96 +470,61 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.map_toolbar = QToolBar()
             self.map_toolbar.setIconSize(QSize(16, 16))
 
-            # Zoom In button
             self.zoom_in_button = QPushButton("Zoom In")
             self.zoom_in_button.clicked.connect(self.zoom_in)
             self.map_toolbar.addWidget(self.zoom_in_button)
 
-            # Zoom Out button
             self.zoom_out_button = QPushButton("Zoom Out")
             self.zoom_out_button.clicked.connect(self.zoom_out)
             self.map_toolbar.addWidget(self.zoom_out_button)
 
-            # Zoom to Full Extent button
             self.zoom_full_button = QPushButton("Zoom to Layer")
             self.zoom_full_button.clicked.connect(self.zoom_to_layer)
             self.map_toolbar.addWidget(self.zoom_full_button)
 
-            # Pan button
             self.pan_button = QPushButton("Pan")
             self.pan_button.setCheckable(True)
             self.pan_button.clicked.connect(self.toggle_pan)
             self.map_toolbar.addWidget(self.pan_button)
 
-            # Rectangle Select button
             self.rect_select_button = QPushButton("Rectangle Select")
             self.rect_select_button.setCheckable(True)
             self.rect_select_button.clicked.connect(self.toggle_rectangle_select)
             self.map_toolbar.addWidget(self.rect_select_button)
 
-            # Add toolbar and canvas to the container
             self.verticalLayout_map.addWidget(self.map_toolbar)
             self.verticalLayout_map.addWidget(self.map_canvas)
 
-            # Set map CRS to EPSG:3857 (Web Mercator for OSM)
             canvas_crs = QgsCoordinateReferenceSystem("EPSG:3857")
             self.map_canvas.setDestinationCrs(canvas_crs)
 
-            # Show the widgets explicitly
             self.map_toolbar.show()
             self.map_canvas.show()
             self.map_canvas_container.show()
 
         # Setup map with target layer and OpenStreetMap
-        # Create OpenStreetMap base layer
         osm_layer = self.create_osm_layer()
 
-        # Set CRS to Web Mercator (EPSG:3857) for OSM compatibility
         self.map_canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
 
-        # Set layers - target layer on top, OSM as base
         layers_to_display = [self.target_layer]
         if osm_layer and osm_layer.isValid():
             layers_to_display.append(osm_layer)
 
-        # Clear existing layers and set new ones (same as page 3)
         self.map_canvas.setLayers([])
         self.map_canvas.setLayers(layers_to_display)
 
-        # Get target layer extent and transform to EPSG:3857 if needed
-        extent = self.target_layer.extent()
-        if not extent.isNull() and not extent.isEmpty():
-            # Transform extent to map CRS (EPSG:3857) if layer uses different CRS
-            if self.target_layer.crs() != self.map_canvas.mapSettings().destinationCrs():
-                transform = QgsCoordinateTransform(
-                    self.target_layer.crs(),
-                    self.map_canvas.mapSettings().destinationCrs(),
-                    QgsProject.instance()
-                )
-                extent = transform.transformBoundingBox(extent)
+        # Zoom to target layer extent using utility function
+        extent = transform_extent_to_canvas_crs(self.map_canvas, self.target_layer)
+        self.map_canvas.setExtent(extent)
 
-            extent.scale(1.1)  # Add 10% buffer
-            self.map_canvas.setExtent(extent)
-        else:
-            # Fallback to world extent in EPSG:3857
-            extent = QgsRectangle(-20037508, -20037508, 20037508, 20037508)
-            self.map_canvas.setExtent(extent)
-
-        # Set white background
         self.map_canvas.setCanvasColor(Qt.white)
-
-        # Enable rendering
         self.map_canvas.setRenderFlag(True)
-
-        # Force the canvas to be visible
         self.map_canvas.show()
         self.map_canvas_container.show()
-
-        # Force refresh
         self.map_canvas.refresh()
         QtWidgets.QApplication.processEvents()
         self.map_canvas.repaint()
-
 
         # Create and set the custom selection tool
         self.map_tool_select = FeatureSelectionTool(
@@ -1190,36 +542,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 pass
             self.target_layer.selectionChanged.connect(self.update_selection_count)
 
-        # Restore saved selection if user is coming back from page 3
+        # Restore saved selection
         if saved_selection and len(saved_selection) > 0:
             self.target_layer.selectByIds(saved_selection)
 
-        # Update selection count
         self.update_selection_count()
 
     def create_osm_layer(self):
-        """Create an OpenStreetMap base layer.
-
-        Note: This method is currently not used because OSM tiles don't render
-        properly in custom QgsMapCanvas widgets outside the main QGIS window.
-        This is a known limitation of QGIS when using secondary canvas widgets.
-
-        Kept here for future reference or alternative implementations.
-
-        Returns:
-            QgsRasterLayer: The OSM layer, or None if creation failed
-        """
-        # OpenStreetMap XYZ tile service URL
+        """Create an OpenStreetMap base layer."""
         osm_url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0&crs=EPSG:3857"
-
-        # Create the raster layer with correct provider
         osm_layer = QgsRasterLayer(osm_url, "OpenStreetMap", "wms")
-
-        # Check if the layer is valid
         if osm_layer.isValid():
             return osm_layer
-        else:
-            return None
+        return None
 
     def get_target_layer(self):
         """Get the layer marked as 'Include as Target' from page 1."""
@@ -1227,7 +562,6 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo and combo.currentText() == self.STATUS_TARGET:
                 layer_name = self.tableWidget_layers.item(row, 0).text()
-                # Find the layer in the project
                 layers = QgsProject.instance().mapLayersByName(layer_name)
                 if layers:
                     return layers[0]
@@ -1257,17 +591,14 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Validate page 2 before allowing user to proceed."""
         if not self.target_layer:
             QtWidgets.QMessageBox.warning(
-                self,
-                "Validation Error",
+                self, "Validation Error",
                 "No target layer is available."
             )
             return False
 
-        # Check if at least one feature is selected
         if self.target_layer.selectedFeatureCount() == 0:
             QtWidgets.QMessageBox.warning(
-                self,
-                "Validation Error",
+                self, "Validation Error",
                 "Please select at least one feature before proceeding."
             )
             return False
@@ -1275,323 +606,82 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Create new layer with selected features
         selected_ids = list(self.target_layer.selectedFeatureIds())
         if selected_ids:
-            # Check if we already have a layer with the same name and features
             expected_layer_name = f"{self.target_layer.name()}_selection"
             should_create_new = True
 
-            # Check if selected_features_layer already exists and has the same features
             try:
                 if self.selected_features_layer and self.selected_features_layer.isValid():
                     existing_ids = [f.id() for f in self.selected_features_layer.getFeatures()]
-                    # Compare if the feature IDs match (sorted for comparison)
                     if sorted(existing_ids) == sorted(selected_ids):
-                        # Same features, no need to create a new layer
                         should_create_new = False
             except RuntimeError:
-                # Layer was deleted from QGIS, reset reference and create new one
                 self.selected_features_layer = None
                 should_create_new = True
 
-            # Also check if a layer with this name already exists in the project
             if should_create_new:
                 existing_layers = QgsProject.instance().mapLayersByName(expected_layer_name)
                 for existing_layer in existing_layers:
                     if isinstance(existing_layer, QgsVectorLayer):
                         existing_ids = [f.id() for f in existing_layer.getFeatures()]
                         if sorted(existing_ids) == sorted(selected_ids):
-                            # Found a layer with same name and same features, reuse it
                             self.selected_features_layer = existing_layer
                             should_create_new = False
                             break
 
-            # Create new layer only if needed
             if should_create_new:
-                # Remove old layer from project if it exists
                 try:
                     if self.selected_features_layer and self.selected_features_layer.isValid():
                         QgsProject.instance().removeMapLayer(self.selected_features_layer.id())
                 except RuntimeError:
-                    # Layer was already deleted, that's fine
                     pass
 
-                # Create the new layer
                 if self.map_tool_select:
                     self.selected_features_layer = self.map_tool_select.create_layer_from_feature_id(
                         self.target_layer,
                         selected_ids
                     )
 
-                    # Add the new layer to the project
                     if self.selected_features_layer and self.selected_features_layer.isValid():
                         QgsProject.instance().addMapLayer(self.selected_features_layer)
 
         return True
 
-    def _get_geometry_category(self, layer):
-        """Get the geometry category for a layer (Point, Line, or Polygon).
-
-        Args:
-            layer: QgsVectorLayer
-
-        Returns:
-            str: 'Point', 'Line', 'Polygon', or 'Unknown'
-        """
-        if not layer or not layer.isValid():
-            return 'Unknown'
-
-        geom_type = layer.geometryType()
-        # QgsWkbTypes.GeometryType: 0=Point, 1=Line, 2=Polygon
-        if geom_type == 0:  # Point
-            return 'Point'
-        elif geom_type == 1:  # Line
-            return 'Line'
-        elif geom_type == 2:  # Polygon
-            return 'Polygon'
-        else:
-            return 'Unknown'
-
-    def detect_assessment_complexity(self):
-        """Detect if this is a simple or complex assessment case.
-
-        Validates geometry compatibility based on:
-        - Point + Polygon -> Intersect only
-        - Line + Polygon -> Intersect only
-        - Polygon + Polygon -> Intersect / Union (both valid)
-        - Point + Point -> Union (normally not useful, warning)
-
-        Returns:
-            dict: A dictionary containing:
-                - 'is_simple': bool - True if only target layer
-                - 'operation_type': str - Type of operation needed
-                - 'included_layers': list - Layers marked as 'Include in assessment'
-                - 'spatial_markers': list - Layers marked as 'Spatial Marker'
-                - 'target_layer': QgsVectorLayer - The target layer
-                - 'valid_operations': list - Valid operations based on geometry types
-                - 'geometry_warning': str - Warning message if geometry combination is unusual
-        """
-        result = {
-            'is_simple': False,
-            'is_easy_complex': False,
-            'is_super_complex': False,
-            'operation_type': 'none',
-            'included_layers': [],
-            'spatial_markers': [],
-            'target_layer': None,
-            'requires_union': False,
-            'requires_intersect': False,
-            'valid_operations': [],
-            'geometry_warning': None,
-            'target_geometry': None,
-            'assessment_geometry': None
-        }
-
-        # Collect layers by status
-        for row in range(self.tableWidget_layers.rowCount()):
-            layer_name_item = self.tableWidget_layers.item(row, 0)
-            status_combo = self.tableWidget_layers.cellWidget(row, 2)
-
-            if layer_name_item and status_combo:
-                layer_name = layer_name_item.text()
-                status = status_combo.currentText()
-
-                # Get the actual layer from QGIS project
-                layers = QgsProject.instance().mapLayersByName(layer_name)
-                if layers and isinstance(layers[0], QgsVectorLayer):
-                    layer = layers[0]
-
-                    if status == self.STATUS_TARGET:
-                        result['target_layer'] = layer
-                        result['target_geometry'] = self._get_geometry_category(layer)
-                    elif status == self.STATUS_INCLUDE:
-                        result['included_layers'].append(layer)
-                    elif status == self.STATUS_SPATIAL_MARKER:
-                        result['spatial_markers'].append(layer)
-
-        # Determine geometry types and valid operations
-        num_assessment_layers = len(result['included_layers'])
-        num_spatial_markers = len(result['spatial_markers'])
-        target_geom = result['target_geometry']
-
-        # Simple case: Only target layer, no additional assessment layers
-        if num_assessment_layers == 0 and num_spatial_markers == 0:
-            result['is_simple'] = True
-            result['operation_type'] = 'none'
-            result['valid_operations'] = []
-            return result
-
-        # Get assessment layer geometry (use first assessment layer for validation)
-        if result['included_layers']:
-            assessment_geom = self._get_geometry_category(result['included_layers'][0])
-            result['assessment_geometry'] = assessment_geom
-
-            # Determine valid operations based on geometry combination
-            # Point + Polygon -> Intersect only
-            if target_geom == 'Point' and assessment_geom == 'Polygon':
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-            # Line + Polygon -> Intersect only
-            elif target_geom == 'Line' and assessment_geom == 'Polygon':
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-            # Polygon + Polygon -> Intersect / Union (both valid)
-            elif target_geom == 'Polygon' and assessment_geom == 'Polygon':
-                result['valid_operations'] = ['intersect', 'union', 'both']
-                result['requires_intersect'] = True
-                result['requires_union'] = True
-                result['operation_type'] = 'both'
-
-            # Point + Point -> Union (normally not useful)
-            elif target_geom == 'Point' and assessment_geom == 'Point':
-                result['valid_operations'] = ['union']
-                result['requires_union'] = True
-                result['operation_type'] = 'union'
-                result['geometry_warning'] = 'Union between Point layers is normally not useful'
-
-            # Line + Line -> Union (normally not useful)
-            elif target_geom == 'Line' and assessment_geom == 'Line':
-                result['valid_operations'] = ['union']
-                result['requires_union'] = True
-                result['operation_type'] = 'union'
-                result['geometry_warning'] = 'Union between Line layers is normally not useful'
-
-            # Polygon + Point -> Intersect only (reversed case)
-            elif target_geom == 'Polygon' and assessment_geom == 'Point':
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-            # Polygon + Line -> Intersect only (reversed case)
-            elif target_geom == 'Polygon' and assessment_geom == 'Line':
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-            # Line + Point or Point + Line -> Intersect only
-            elif (target_geom == 'Line' and assessment_geom == 'Point') or \
-                 (target_geom == 'Point' and assessment_geom == 'Line'):
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-            # Default case
-            else:
-                result['valid_operations'] = ['intersect']
-                result['requires_intersect'] = True
-                result['operation_type'] = 'intersect'
-
-        # Determine complexity level
-        if num_assessment_layers == 1 and num_spatial_markers <= 1:
-            result['is_easy_complex'] = True
-        elif num_assessment_layers > 1 or num_spatial_markers > 1:
-            result['is_super_complex'] = True
-        else:
-            result['is_easy_complex'] = True
-
-        return result
-
-    def get_assessment_summary(self):
-        """Get a human-readable summary of the assessment complexity.
-
-        Returns:
-            str: Summary description of the assessment type
-        """
-        complexity = self.detect_assessment_complexity()
-
-        # Simple case: Only target layer
-        if complexity['is_simple']:
-            return "Simple Assessment (Target layer only)"
-
-        # Easy complex case: 1 assessment layer + 1 spatial marker
-        if complexity['is_easy_complex']:
-            summary_parts = ["Easy Complex Assessment:"]
-            summary_parts.append(f"- 1 assessment layer to combine")
-            summary_parts.append(f"- 1 spatial marker for filtering")
-
-            if complexity['requires_union'] and complexity['requires_intersect']:
-                summary_parts.append("- Union and Intersection operations required")
-            elif complexity['requires_union']:
-                summary_parts.append("- Union operation required")
-            elif complexity['requires_intersect']:
-                summary_parts.append("- Intersection operation required")
-
-            return "\n".join(summary_parts)
-
-        # Super complex case: Multiple assessment layers or spatial markers
-        if complexity['is_super_complex']:
-            summary_parts = ["Super Complex Assessment:"]
-
-            if complexity['included_layers']:
-                summary_parts.append(f"- {len(complexity['included_layers'])} assessment layer(s) to combine")
-
-            if complexity['spatial_markers']:
-                summary_parts.append(f"- {len(complexity['spatial_markers'])} spatial marker(s) for filtering")
-
-            if complexity['requires_union'] and complexity['requires_intersect']:
-                summary_parts.append("- Union and Intersection operations required")
-            elif complexity['requires_union']:
-                summary_parts.append("- Union operation required")
-            elif complexity['requires_intersect']:
-                summary_parts.append("- Intersection operation required")
-
-            return "\n".join(summary_parts)
-
-        # Default complex case (assessment layers or spatial markers only)
-        summary_parts = ["Complex Assessment:"]
-
-        if complexity['included_layers']:
-            summary_parts.append(f"- {len(complexity['included_layers'])} assessment layer(s) to combine")
-
-        if complexity['spatial_markers']:
-            summary_parts.append(f"- {len(complexity['spatial_markers'])} spatial marker(s) for filtering")
-
-        if complexity['operation_type'] != 'none':
-            operation_desc = {
-                'union': 'Union operation required',
-                'intersect': 'Intersection operation required',
-                'both': 'Union and Intersection operations required'
-            }
-            summary_parts.append(f"- {operation_desc.get(complexity['operation_type'], 'Spatial operations required')}")
-
-        return "\n".join(summary_parts)
+    # ------------------------------------------------------------------ #
+    #  Page 3: Summary
+    # ------------------------------------------------------------------ #
 
     def initialize_page_3(self):
         """Initialize the third wizard page."""
-        # Set up the summary table headers
         self.tableWidget_summary_layers.setColumnCount(3)
-        self.tableWidget_summary_layers.setHorizontalHeaderLabels(["Layer Name", "Geometry Type", "Status"])
+        self.tableWidget_summary_layers.setHorizontalHeaderLabels(
+            ["Layer Name", "Geometry Type", "Status"]
+        )
         self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
-
 
     def setup_page_3(self):
         """Populate page 3 with summary information."""
-        # Get assessment name and description from page 1
         assessment_name = self.lineEdit_name.text().strip()
         assessment_description = self.textEdit_description.toPlainText().strip()
 
-        # Update the summary labels
         self.label_summary_name.setText(assessment_name)
-        self.label_summary_description.setText(assessment_description if assessment_description else "No description provided")
+        self.label_summary_description.setText(
+            assessment_description if assessment_description else "No description provided"
+        )
 
-        # Detect assessment complexity and display information
-        # complexity = self.detect_assessment_complexity()
-        assessment_summary = self.get_assessment_summary()
+        # Get assessment summary using extracted utility
+        summary = get_assessment_summary(
+            self.tableWidget_layers, self._status_constants()
+        )
+        self.label_complexity_summary.setText(summary)
 
-        # Display complexity summary in the dedicated label
-        self.label_complexity_summary.setText(assessment_summary)
-
-
-        # Get selected feature count from target layer
+        # Selected feature count
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             feature_count = self.target_layer.selectedFeatureCount()
             self.label_summary_features.setText(f"{feature_count} features selected")
         else:
             self.label_summary_features.setText("0 features selected")
 
-        # Populate the layers table with all included layers
+        # Populate layers summary table
         self.tableWidget_summary_layers.setRowCount(0)
 
         row = 0
@@ -1603,23 +693,20 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             if layer_name_item and status_combo:
                 status = status_combo.currentText()
 
-                # Only include layers that are not "Do not include"
                 if status != self.STATUS_DO_NOT_INCLUDE:
                     self.tableWidget_summary_layers.insertRow(row)
 
-                    # Add layer name
                     name_item = QTableWidgetItem(layer_name_item.text())
                     self.tableWidget_summary_layers.setItem(row, 0, name_item)
 
-                    # Add geometry type
-                    geometry_item = QTableWidgetItem(geometry_type_item.text() if geometry_type_item else "Unknown")
+                    geometry_item = QTableWidgetItem(
+                        geometry_type_item.text() if geometry_type_item else "Unknown"
+                    )
                     self.tableWidget_summary_layers.setItem(row, 1, geometry_item)
 
-                    # Add status
                     status_item = QTableWidgetItem(status)
                     self.tableWidget_summary_layers.setItem(row, 2, status_item)
 
-                    # Highlight the target layer
                     if status == self.STATUS_TARGET:
                         name_item.setBackground(Qt.gray)
                         geometry_item.setBackground(Qt.gray)
@@ -1627,20 +714,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
                     row += 1
 
-        # Resize columns to content
         self.tableWidget_summary_layers.resizeColumnsToContents()
 
-        # Create and setup map canvas for page 3 to show selected features
+        # Setup map canvas for page 3
         if not self.map_canvas_page3:
-            # Create map canvas with the container widget as parent
             self.map_canvas_page3 = QgsMapCanvas(self.widget_map_container_page3)
             self.map_canvas_page3.setCanvasColor(Qt.white)
-
-            # Set size for the canvas
             self.map_canvas_page3.setMinimumSize(400, 400)
             self.map_canvas_page3.resize(800, 400)
 
-            # Create or get the layout for the container widget
             if not self.widget_map_container_page3.layout():
                 layout = QVBoxLayout(self.widget_map_container_page3)
                 layout.setContentsMargins(0, 0, 0, 0)
@@ -1649,80 +731,55 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
             layout.addWidget(self.map_canvas_page3)
 
-            # Set map CRS to EPSG:3857 (Web Mercator for OSM)
             canvas_crs = QgsCoordinateReferenceSystem("EPSG:3857")
             self.map_canvas_page3.setDestinationCrs(canvas_crs)
 
-            # Show the widgets explicitly
             self.map_canvas_page3.show()
             self.widget_map_container_page3.show()
             self.groupBox_selected_features_map.show()
 
-        # Display the selected features layer if it exists
+        # Display the selected features layer
         if self.selected_features_layer and self.selected_features_layer.isValid():
-            # Create OpenStreetMap base layer
             osm_layer = self.create_osm_layer()
+            self.map_canvas_page3.setDestinationCrs(
+                QgsCoordinateReferenceSystem("EPSG:3857")
+            )
 
-            # Set CRS to Web Mercator for OSM compatibility
-            self.map_canvas_page3.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
-
-            # Get "Include as assessment" layers from page 1 configuration
+            # Get assessment layers for display
             assessment_layers = []
             for table_row in range(self.tableWidget_layers.rowCount()):
                 layer_name_item = self.tableWidget_layers.item(table_row, 0)
                 status_combo = self.tableWidget_layers.cellWidget(table_row, 2)
 
                 if layer_name_item and status_combo:
-                    status = status_combo.currentText()
-
-                    # Find layers with "Include in assessment" status
-                    if status == self.STATUS_INCLUDE:
+                    if status_combo.currentText() == self.STATUS_INCLUDE:
                         layer_name = layer_name_item.text()
                         layers = QgsProject.instance().mapLayersByName(layer_name)
                         if layers and isinstance(layers[0], QgsVectorLayer):
                             assessment_layers.append(layers[0])
 
-            # Set layers to display in order (first in list = top, last = bottom):
-            # 1. Target layer with selected features (top - most visible)
-            # 2. Assessment layers (middle)
-            # 3. OSM base layer (bottom)
-            layers_to_display = []
-
-            # 1. Selected features layer / Target (will be on top - most visible)
-            layers_to_display.append(self.selected_features_layer)
-
-            # 2. Assessment layers (middle)
+            layers_to_display = [self.selected_features_layer]
             layers_to_display.extend(assessment_layers)
-
-            # 3. OSM base layer (bottom)
             if osm_layer and osm_layer.isValid():
                 layers_to_display.append(osm_layer)
 
-            # Clear existing layers and set new ones
             self.map_canvas_page3.setLayers([])
             self.map_canvas_page3.setLayers(layers_to_display)
 
-            # Zoom to selected features layer extent
-            layer_extent = self.selected_features_layer.extent()
-            if not layer_extent.isNull() and not layer_extent.isEmpty():
-                # Transform extent to map CRS (EPSG:3857) if needed
-                if self.selected_features_layer.crs() != self.map_canvas_page3.mapSettings().destinationCrs():
-                    transform = QgsCoordinateTransform(
-                        self.selected_features_layer.crs(),
-                        self.map_canvas_page3.mapSettings().destinationCrs(),
-                        QgsProject.instance()
-                    )
-                    layer_extent = transform.transformBoundingBox(layer_extent)
+            # Zoom to selected features using utility function
+            extent = transform_extent_to_canvas_crs(
+                self.map_canvas_page3, self.selected_features_layer
+            )
+            self.map_canvas_page3.setExtent(extent)
 
-                # Scale extent by 10% for better visibility
-                layer_extent.scale(1.1)
-                self.map_canvas_page3.setExtent(layer_extent)
-
-            # Enable rendering and refresh canvas
             self.map_canvas_page3.setRenderFlag(True)
             self.map_canvas_page3.refresh()
             QtWidgets.QApplication.processEvents()
             self.map_canvas_page3.repaint()
+
+    # ------------------------------------------------------------------ #
+    #  Map controls
+    # ------------------------------------------------------------------ #
 
     def zoom_in(self):
         """Zoom in on the map canvas."""
@@ -1737,35 +794,21 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def zoom_to_layer(self):
         """Zoom to the extent of the target layer."""
         if self.map_canvas and self.target_layer:
-            extent = self.target_layer.extent()
-            if not extent.isNull() and not extent.isEmpty():
-                # Transform extent to map CRS if needed
-                if self.target_layer.crs() != self.map_canvas.mapSettings().destinationCrs():
-                    transform = QgsCoordinateTransform(
-                        self.target_layer.crs(),
-                        self.map_canvas.mapSettings().destinationCrs(),
-                        QgsProject.instance()
-                    )
-                    extent = transform.transformBoundingBox(extent)
-
-                extent.scale(1.1)  # Add 10% buffer
-                self.map_canvas.setExtent(extent)
-                self.map_canvas.refresh()
+            extent = transform_extent_to_canvas_crs(self.map_canvas, self.target_layer)
+            self.map_canvas.setExtent(extent)
+            self.map_canvas.refresh()
 
     def toggle_pan(self):
         """Toggle pan mode for the map canvas."""
         if self.map_canvas:
             if self.pan_button.isChecked():
-                # Uncheck rectangle select if it's checked
                 if hasattr(self, 'rect_select_button') and self.rect_select_button.isChecked():
                     self.rect_select_button.setChecked(False)
 
-                # Create pan tool if it doesn't exist
                 if not hasattr(self, 'pan_tool'):
                     self.pan_tool = QgsMapToolPan(self.map_canvas)
                 self.map_canvas.setMapTool(self.pan_tool)
             else:
-                # Switch back to selection tool
                 if self.map_tool_select:
                     self.map_canvas.setMapTool(self.map_tool_select)
 
@@ -1773,11 +816,9 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Toggle rectangle selection mode for the map canvas."""
         if self.map_canvas:
             if self.rect_select_button.isChecked():
-                # Uncheck pan if it's checked
                 if hasattr(self, 'pan_button') and self.pan_button.isChecked():
                     self.pan_button.setChecked(False)
 
-                # Always recreate the rectangle select tool to ensure it has the current target layer
                 self.rect_select_tool = RectangleSelectTool(
                     self.map_canvas,
                     self.target_layer,
@@ -1785,6 +826,5 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 )
                 self.map_canvas.setMapTool(self.rect_select_tool)
             else:
-                # Switch back to point selection tool
                 if self.map_tool_select:
                     self.map_canvas.setMapTool(self.map_tool_select)
