@@ -1,0 +1,7 @@
+projects/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+admin.sqlite

@@ -429,6 +429,7 @@ class ProjectManager:
             "/Applications/QGIS-LTR.app/Contents/MacOS/lib/mod_spatialite.7.so",
             "/Applications/QGIS-LTR.app/Contents/MacOS/lib/mod_spatialite.so",
         ]
+        
         for path in mac_paths:
             if os.path.exists(path):
                 try:

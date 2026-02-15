@@ -260,6 +260,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.tableWidget_layers.setRowCount(0)
 
         root = QgsProject.instance().layerTreeRoot()
+
+        # Look for a group called "Base Layers" to find input layers
         base_layers_group = root.findGroup("Base Layers")
 
         if not base_layers_group:

@@ -15,7 +15,8 @@ from .spatial_analysis_spatialite import SpatialAnalyzerLite, OperationType
 class AssessmentExecutor:
     """Executes assessment workflows: memory-only or spatial analysis."""
 
-    OUTPUT_GROUP_NAME = "Output Layers"
+    #  Group name for created layers in the layer tree
+    OUTPUT_GROUP_NAME = "Output Layers" 
 
     def __init__(self, project_id, admin_manager, project_db_id):
         """

@@ -178,81 +178,103 @@ class SpatialAnalyzerLite:
     # ------------------------------------------------------------------ #
 
     def _build_intersect_query(self, target_table, assessment_table, output_table):
-        """Build intersection query using SpatiaLite functions."""
+        """Build intersection query using SpatiaLite functions.
+        Uses subquery to compute Intersection() once per feature pair.
+        """
         return f"""
         CREATE TABLE {output_table} AS
         SELECT
-            NULL AS gid,
-            a.id AS input_id,
-            b.id AS identity_id,
-            CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
-            'intersect' AS split_type,
-            Area(Intersection(a.geom, b.geom)) AS shape_area,
-            Perimeter(Intersection(a.geom, b.geom)) AS shape_length
-        FROM {target_table} a
-        JOIN {assessment_table} b
-          ON Intersects(a.geom, b.geom)
-        WHERE IsValid(a.geom)
-          AND IsValid(b.geom)
-          AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON', 'MULTIPOLYGON')
-          AND IsValid(Intersection(a.geom, b.geom))
+            input_id,
+            identity_id,
+            geom,
+            split_type,
+            Area(geom) AS shape_area,
+            Perimeter(geom) AS shape_length
+        FROM (
+            SELECT
+                a.id AS input_id,
+                b.id AS identity_id,
+                CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
+                'intersect' AS split_type
+            FROM {target_table} a
+            JOIN {assessment_table} b
+              ON Intersects(a.geom, b.geom)
+            WHERE IsValid(a.geom)
+              AND IsValid(b.geom)
+        ) sub
+        WHERE geom IS NOT NULL
+          AND IsValid(geom)
+          AND GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
         """
 
     def _build_union_query(self, target_table, assessment_table, output_table):
-        """Build union query using SpatiaLite functions."""
+        """Build union query using SpatiaLite functions.
+        Uses subquery to compute GUnion() once.
+        """
         return f"""
         CREATE TABLE {output_table} AS
         SELECT
             1 AS gid,
             NULL AS input_id,
             NULL AS identity_id,
-            CastToMultiPolygon(GUnion(geom)) AS geom,
+            geom,
             'union' AS split_type,
-            Area(GUnion(geom)) AS shape_area,
-            Perimeter(GUnion(geom)) AS shape_length
+            Area(geom) AS shape_area,
+            Perimeter(geom) AS shape_length
         FROM (
-            SELECT geom FROM {target_table} WHERE IsValid(geom)
-            UNION ALL
-            SELECT geom FROM {assessment_table} WHERE IsValid(geom)
-        ) combined
-        WHERE GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+            SELECT CastToMultiPolygon(GUnion(geom)) AS geom
+            FROM (
+                SELECT geom FROM {target_table} WHERE IsValid(geom)
+                UNION ALL
+                SELECT geom FROM {assessment_table} WHERE IsValid(geom)
+            ) combined
+            WHERE GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+        ) result
         """
 
     def _build_both_query(self, target_table, assessment_table, output_table):
-        """Build query for both intersection and non-intersection."""
+        """Build query for both intersection and non-intersection.
+        Uses subquery to compute Intersection() once per feature pair.
+        """
         return f"""
         CREATE TABLE {output_table} AS
-        SELECT * FROM (
+        SELECT
+            input_id,
+            identity_id,
+            geom,
+            split_type,
+            Area(geom) AS shape_area,
+            Perimeter(geom) AS shape_length
+        FROM (
             SELECT
                 a.id AS input_id,
                 b.id AS identity_id,
                 CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
-                'intersect' AS split_type,
-                Area(Intersection(a.geom, b.geom)) AS shape_area,
-                Perimeter(Intersection(a.geom, b.geom)) AS shape_length
+                'intersect' AS split_type
             FROM {target_table} a
             JOIN {assessment_table} b
               ON Intersects(a.geom, b.geom)
             WHERE IsValid(a.geom)
               AND IsValid(b.geom)
-              AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON', 'MULTIPOLYGON')
-              AND IsValid(Intersection(a.geom, b.geom))
+        ) sub
+        WHERE geom IS NOT NULL
+          AND IsValid(geom)
+          AND GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
 
-            UNION ALL
+        UNION ALL
 
-            SELECT
-                a.id AS input_id,
-                NULL AS identity_id,
-                CastToMultiPolygon(a.geom) AS geom,
-                'no_overlap' AS split_type,
-                Area(a.geom) AS shape_area,
-                Perimeter(a.geom) AS shape_length
-            FROM {target_table} a
-            LEFT JOIN {assessment_table} b
-              ON Intersects(a.geom, b.geom)
-            WHERE b.id IS NULL
-              AND IsValid(a.geom)
-        )
+        SELECT
+            a.id AS input_id,
+            NULL AS identity_id,
+            CastToMultiPolygon(a.geom) AS geom,
+            'no_overlap' AS split_type,
+            Area(a.geom) AS shape_area,
+            Perimeter(a.geom) AS shape_length
+        FROM {target_table} a
+        LEFT JOIN {assessment_table} b
+          ON Intersects(a.geom, b.geom)
+        WHERE b.id IS NULL
+          AND IsValid(a.geom)
         """
 
     # ------------------------------------------------------------------ #

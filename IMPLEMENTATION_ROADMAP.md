@@ -1,657 +1,673 @@
-# Implementation Roadmap — Hybrid Database Architecture
-
+# Implementation Roadmap — Assessment Wizard (SpatiaLite)
 > "Si no puedo reproducirlo, no es GIS profesional."
+> Última actualización: 2026-02-14 — Integra ajustes técnicos de revisión con Steve.
 
 ---
 
-## Arquitectura Objetivo
+## Arquitectura objetivo
 
 ```
-assessment_wizard/                          ← plugin directory
-├── admin.sqlite                            ← metadatos centrales
-├── projects/                               ← carpeta de proyectos
-│   ├── project_001.sqlite                  ← datos espaciales (SpatiaLite)
-│   ├── project_002.sqlite
-│   └── project_003.sqlite
-├── admin_manager.py                        ← gestiona admin.sqlite
-├── project_manager.py                      ← gestiona project_XXX.sqlite
-├── spatial_analysis_sketlite.py            ← analisis con SpatiaLite
-├── main_form.py                            ← UI principal con TreeView
-├── assessment_wizard.py                    ← entry point del plugin
-├── assessment_wizard_dialog.py             ← wizard de 3 paginas
-└── ...
+assessment_wizard/
+├── admin.sqlite                        ← metadatos centrales (proyectos, assessments, provenance)
+├── projects/
+│   ├── project_001.sqlite              ← datos espaciales por proyecto (SpatiaLite)
+│   └── project_002.sqlite
+├── admin_manager.py        ✅          ← gestiona admin.sqlite
+├── project_manager.py      ✅          ← gestiona project_XXX.sqlite
+├── spatial_analysis_spatialite.py ✅   ← análisis espacial SpatiaLite
+├── geometry_utils.py       ✅          ← utilidades CRS/geometría (SOLID)
+├── map_tools.py            ✅          ← herramientas de mapa (SOLID)
+├── layer_migration.py      ✅          ← servicio de migración (SOLID)
+├── assessment_executor.py  ✅          ← ejecutor de assessments (SOLID)
+├── main_form.py            ⏳          ← UI principal con TreeView EMDS 3
+├── assessment_wizard_dialog.py ⏳      ← wizard 3 páginas (flujo corregido)
+├── assessment_wizard.py                ← entry point del plugin
+└── [archivos legacy a eliminar]
 ```
 
 ---
 
-## Estado actual vs Objetivo
+## Estado general
 
-| Componente | Actual | Objetivo |
-|---|---|---|
-| DB metadatos | `metadata.db` (1 global) | `admin.sqlite` (5 tablas) |
-| DB espacial | PostgreSQL/PostGIS (`database_manager.py`) | SpatiaLite por proyecto (`project_manager.py`) |
-| Analisis | `spatial_analysis.py` (PostGIS SQL) | SpatiaLite SQL (funciones equivalentes) |
-| TreeView | Project → Assessment (2 niveles) | Project → Base Layers / Assessments → Provenance (4 niveles) |
-| Visibilidad | En memoria (se pierde al cerrar) | Persistida en `layer_visibility_state` |
-| Capas | Leidas directo de QGIS | Registradas en `assessment_layers` + `base_layers_registry` |
+| Fase | Descripción | Estado |
+|------|-------------|--------|
+| 1 | admin.sqlite + AdminManager | ✅ Completo |
+| 2 | project_XXX.sqlite + ProjectManager | ✅ Completo |
+| 3 | SpatialAnalyzerLite | ✅ Completo |
+| SOLID | Refactor assessment_wizard_dialog.py | ✅ Completo |
+| 2B | Ajustes a ProjectManager (nuevos métodos) | ⏳ Pendiente |
+| 3B | Output corregido: 1 tabla final | ⏳ Pendiente |
+| 4 | TreeView extendido + modelo Provenance | ⏳ Pendiente |
+| 5 | Wizard: flujo completo corregido | ⏳ Pendiente |
+| 6 | Limpieza legacy + metadatos enriquecidos | ⏳ Pendiente |
 
 ---
 
-## FASE 1 — admin.sqlite (Evolucion de metadata_manager.py)
+## FASE 1 — admin.sqlite ✅ COMPLETO
 
-### Objetivo
-Migrar `metadata_manager.py` → `admin_manager.py` con el esquema completo de `admin.sqlite`.
-
-### Archivo: `admin_manager.py` (NUEVO, reemplaza `metadata_manager.py`)
-
-### Schema completo
+### Schema implementado
 
 ```sql
--- Tabla 1: projects
-CREATE TABLE IF NOT EXISTS projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT DEFAULT '',
-    db_path TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
+projects          (id, uuid, name, description, db_path, created_at)
+assessments       (id, uuid, project_id→FK, name, description, target_layer,
+                   spatial_extent, created_at)
+assessment_layers (id, assessment_id→FK, layer_name, layer_type, geometry_type)
+layer_visibility_state (assessment_id→FK, layer_name, visible)
+workflow_steps    (id, assessment_id→FK, step_order, operation, parameters, created_at)
+```
 
--- Tabla 2: assessments
-CREATE TABLE IF NOT EXISTS assessments (
+### Pendiente en Fase 1: tablas Provenance (se implementan en Fase 4)
+
+Las tablas `provenance` y `task_details` son parte del modelo EMDS 3 y se añaden
+a `admin.sqlite` cuando se implemente el TreeView (Fase 4). Ver detalles allí.
+
+---
+
+## FASE 2 — project_XXX.sqlite ✅ COMPLETO
+
+### Schema implementado
+
+```sql
+-- SpatiaLite inicializado con InitSpatialMetaData()
+base_layers_registry       (id, layer_name, geometry_type, srid, source,
+                            feature_count, created_at)
+assessment_results_metadata (id, assessment_uuid, output_layer, operation,
+                             source_target, source_assessment, feature_count, created_at)
+-- Tablas espaciales dinámicas: migradas con AddGeometryColumn() + CreateSpatialIndex()
+```
+
+---
+
+## FASE 2B — Ajustes a ProjectManager ⏳ PENDIENTE
+
+### Objetivo
+Añadir métodos necesarios para el flujo corregido (output 1 tabla final),
+manejo de geometría 3D y limpieza de temporales.
+
+### Método 1: `rename_table()`
+Renombrar tabla SpatiaLite preservando registro en `geometry_columns`:
+
+```python
+def rename_table(self, old_name, new_name):
+    """Renombrar tabla SpatiaLite y actualizar geometry_columns + spatial index."""
+    cursor = self.connection.cursor()
+
+    # 1. Copiar tabla con nuevo nombre
+    cursor.execute(f"CREATE TABLE {new_name} AS SELECT * FROM {old_name}")
+
+    # 2. Actualizar geometry_columns
+    cursor.execute(
+        "UPDATE geometry_columns SET f_table_name = ? WHERE f_table_name = ?",
+        (new_name, old_name)
+    )
+    self.connection.commit()
+
+    # 3. Eliminar tabla original (sin re-registrar geometry_columns)
+    cursor.execute(f"DROP TABLE IF EXISTS {old_name}")
+
+    # 4. Recrear spatial index en nueva tabla
+    try:
+        cursor.execute(f"SELECT CreateSpatialIndex('{new_name}', 'geom')")
+        self.connection.commit()
+    except Exception as e:
+        print(f"Note: Could not recreate spatial index for {new_name}: {e}")
+
+    cursor.close()
+```
+
+### Método 2: `add_column_to_table()`
+Para añadir columnas de resultados a la tabla base en análisis posteriores:
+
+```python
+def add_column_to_table(self, table_name, column_name, column_type="REAL",
+                         default_value=None):
+    """Añadir columna a tabla existente (análisis posteriores)."""
+    cursor = self.connection.cursor()
+    default_clause = f" DEFAULT {default_value}" if default_value is not None else ""
+    cursor.execute(
+        f'ALTER TABLE {table_name} ADD COLUMN "{column_name}" {column_type}{default_clause}'
+    )
+    self.connection.commit()
+    cursor.close()
+```
+
+### Método 3: `update_column_values()`
+
+```python
+def update_column_values(self, table_name, column_name, id_value_pairs):
+    """Actualizar valores de columna por id. id_value_pairs: {row_id: value}"""
+    cursor = self.connection.cursor()
+    for row_id, value in id_value_pairs.items():
+        cursor.execute(
+            f'UPDATE {table_name} SET "{column_name}" = ? WHERE id = ?',
+            (value, row_id)
+        )
+    self.connection.commit()
+    cursor.close()
+```
+
+### Método 4: `cleanup_temp_tables()`
+Eliminar tablas `_tmp_` que quedaron de sesiones anteriores:
+
+```python
+def cleanup_temp_tables(self):
+    """Eliminar tablas temporales de sesiones previas (patrón *_tmp_*)."""
+    cursor = self.connection.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_tmp_%'"
+    )
+    temp_tables = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    for table in temp_tables:
+        self.drop_table(table)
+        print(f"Cleanup: dropped temp table '{table}'")
+```
+
+Llamar en `connect()` después de `_create_tables()`:
+```python
+def connect(self):
+    ...
+    self._create_tables()
+    self.cleanup_temp_tables()  # ← añadir aquí
+```
+
+### Fix 5: Geometría 3D en `migrate_layer()`
+Manejo de PolygonZ / MultiPolygonZ con fallback a 2D:
+
+```python
+# En migrate_layer(), dentro del loop de features:
+try:
+    geom_wkt = geometry.asWkt()
+    cursor.execute(insert_sql, python_attrs + [geom_wkt, srid])
+    stats['inserted'] += 1
+except Exception:
+    # Fallback: reducir a 2D
+    geom_2d = QgsGeometry(geometry)
+    geom_2d.get().dropZValue()
+    geom_wkt_2d = geom_2d.asWkt()
+    try:
+        cursor.execute(insert_sql, python_attrs + [geom_wkt_2d, srid])
+        stats['inserted'] += 1
+    except Exception as e2:
+        print(f"Error inserting feature (2D fallback failed): {e2}")
+        stats['errors'] += 1
+```
+
+### Verificación Fase 2B
+- [ ] `rename_table()` renombra tabla y actualiza `geometry_columns`
+- [ ] `add_column_to_table()` añade columna sin perder datos existentes
+- [ ] `cleanup_temp_tables()` se ejecuta al conectar, elimina `*_tmp_*`
+- [ ] Geometrías 3D (PolygonZ, MultiPolygonZ) se migran sin error (fallback 2D)
+
+---
+
+## FASE 3 — SpatialAnalyzerLite ✅ COMPLETO
+
+### Implementado
+- `analyze_and_create_layer()` con parámetros `operation_type` y `group_name`
+- `_build_intersect_query()` optimizado (Intersection calculado 1 vez)
+- `_build_union_query()` optimizado (GUnion calculado 1 vez)
+- `_detect_geometry_info()` + fallback en `RecoverGeometryColumn`
+- Capas añadidas al grupo "Output Layers" en el layer tree
+
+---
+
+## FASE 3B — Output corregido: 1 tabla final ⏳ PENDIENTE
+
+### Contexto
+Actualmente el wizard produce 2 capas permanentes (`_intersection` + `_union`).
+El comportamiento correcto es: **1 sola tabla base** por assessment.
+La intersección y union son pasos intermedios (temporales). La **union es la tabla base final**.
+
+### Flujo correcto
+
+```
+Intersect(target, assessment_layer) → tabla TEMPORAL: {base_name}_tmp_intersect
+Union(target, assessment_layer)     → tabla TEMPORAL: {base_name}_tmp_union
+rename(_tmp_union → {base_name})    → tabla FINAL:    project_x__assessment_name ✅
+DROP _tmp_intersect
+DROP _tmp_union
+Crear capa QGIS solo de la tabla final
+```
+
+### Cambio 1: parámetro `add_to_qgis` en `spatial_analysis_spatialite.py`
+
+```python
+def analyze_and_create_layer(self, target_table, assessment_table, output_table,
+                             layer_name=None, operation_type=OperationType.BOTH,
+                             group_name=None, add_to_qgis=True):   # ← nuevo parámetro
+    ...
+    layer = None
+    if add_to_qgis:
+        layer = self._create_qgis_layer(output_table, layer_name, group_name)
+
+    return {
+        'total_count': total_count,
+        'output_table': output_table,
+        'layer': layer,
+        'success': True
+    }
+```
+
+### Cambio 2: reescribir `execute_spatial_assessment()` en `assessment_executor.py`
+
+```python
+def execute_spatial_assessment(self, assessment_name, target_layer,
+                                assessment_layers, description,
+                                parent_widget=None):
+    project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
+    pm = ProjectManager(project_db_path)
+    pm.connect()
+
+    target_table = pm.sanitize_table_name(target_layer.name())
+    if not pm.table_exists(target_table):
+        pm.migrate_layer(target_layer, target_table)
+
+    for al in assessment_layers:
+        at = pm.sanitize_table_name(al.name())
+        if not pm.table_exists(at):
+            pm.migrate_layer(al, at)
+
+    analyzer = SpatialAnalyzerLite(pm)
+    output_tables = []
+
+    for assessment_layer in assessment_layers:
+        assessment_table = pm.sanitize_table_name(assessment_layer.name())
+
+        if len(assessment_layers) == 1:
+            base_name = f"{self.project_id}__{assessment_name}"
+        else:
+            safe = assessment_layer.name().replace(' ', '_')
+            base_name = f"{self.project_id}__{assessment_name}_{safe}"
+
+        tmp_intersect = pm.sanitize_table_name(f"{base_name}_tmp_intersect")
+        tmp_union     = pm.sanitize_table_name(f"{base_name}_tmp_union")
+        final_table   = pm.sanitize_table_name(base_name)
+
+        # Paso 1: Intersection → tabla temporal (sin capa QGIS)
+        analyzer.analyze_and_create_layer(
+            target_table, assessment_table, tmp_intersect,
+            operation_type=OperationType.INTERSECT,
+            add_to_qgis=False
+        )
+
+        # Paso 2: Union → tabla temporal (sin capa QGIS)
+        analyzer.analyze_and_create_layer(
+            target_table, assessment_table, tmp_union,
+            operation_type=OperationType.UNION,
+            add_to_qgis=False
+        )
+
+        # Paso 3: Renombrar union como tabla base final
+        pm.rename_table(tmp_union, final_table)
+
+        # Paso 4: Eliminar temporales
+        pm.drop_table(tmp_intersect)
+
+        # Paso 5: Crear capa QGIS solo de la tabla final
+        layer = analyzer._create_qgis_layer(
+            final_table, base_name, group_name=self.OUTPUT_GROUP_NAME
+        )
+        output_tables.append({'table': final_table, 'layer': layer})
+
+    pm.disconnect()
+
+    if output_tables:
+        names = "\n• ".join(o['layer'].name() for o in output_tables)
+        QMessageBox.information(
+            parent_widget, "Analysis Complete",
+            f"Assessment created successfully!\n\nBase layer(s):\n• {names}"
+        )
+
+    return {
+        'assessment_name': assessment_name,
+        'target_layer': target_layer.name(),
+        'assessment_layers': [l.name() for l in assessment_layers],
+        'output_tables': [o['table'] for o in output_tables],
+        'description': description
+    }
+```
+
+### Verificación Fase 3B
+- [ ] Solo se crea 1 capa QGIS por assessment (la tabla base final)
+- [ ] Tablas `_tmp_intersect` y `_tmp_union` no aparecen en el `.sqlite` al terminar
+- [ ] La tabla final se llama `project_x__assessment_name` (sin sufijo)
+- [ ] Grupo "Output Layers" contiene solo la capa final
+- [ ] El `base_layers_registry` y `assessment_results_metadata` registran correctamente
+
+---
+
+## FASE 4 — TreeView extendido + modelo Provenance ⏳ PENDIENTE
+
+### Objetivo
+Conectar `main_form.py` a `admin_manager.py` e implementar el modelo EMDS 3 completo:
+Project → Base Layers / Assessments → Provenance → Task
+
+### 4A — Tablas Provenance en admin.sqlite
+
+Añadir a `admin_manager.py` (`_create_tables()`):
+
+```sql
+CREATE TABLE IF NOT EXISTS provenance (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid TEXT UNIQUE NOT NULL,
-    project_id INTEGER NOT NULL,
+    assessment_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     description TEXT DEFAULT '',
-    spatial_extent TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(project_id, name),
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-);
-
--- Tabla 3: assessment_layers
-CREATE TABLE IF NOT EXISTS assessment_layers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    assessment_id INTEGER NOT NULL,
-    layer_name TEXT NOT NULL,
-    layer_type TEXT NOT NULL CHECK(layer_type IN ('input', 'output', 'reference')),
-    geometry_type TEXT DEFAULT '',
     FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
 );
 
--- Tabla 4: layer_visibility_state
-CREATE TABLE IF NOT EXISTS layer_visibility_state (
-    assessment_id INTEGER NOT NULL,
-    layer_name TEXT NOT NULL,
-    visible INTEGER DEFAULT 1,
-    PRIMARY KEY (assessment_id, layer_name),
-    FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
-);
-
--- Tabla 5: workflow_steps
-CREATE TABLE IF NOT EXISTS workflow_steps (
+CREATE TABLE IF NOT EXISTS task_details (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    assessment_id INTEGER NOT NULL,
+    uuid TEXT UNIQUE NOT NULL,
+    provenance_id INTEGER NOT NULL,
+    parent_task_id INTEGER DEFAULT NULL,   -- NULL = top level, otra id = hijo
     step_order INTEGER NOT NULL,
-    operation TEXT NOT NULL,
-    parameters TEXT DEFAULT '',
+    operation TEXT NOT NULL,               -- 'union', 'intersect', 'CDP', 'NetWeaver', 'LPA'
+    category TEXT DEFAULT '',
+    input_tables TEXT DEFAULT '',          -- JSON: ["tabla_a", "tabla_b"]
+    output_tables TEXT DEFAULT '',         -- JSON: ["tabla_resultado"]
+    db_type TEXT DEFAULT 'spatialite',
+    added_to_map INTEGER DEFAULT 1,        -- bool
+    scenario TEXT DEFAULT '',
+    symbology TEXT DEFAULT '',
+    duration_ms INTEGER DEFAULT 0,
+    parameters TEXT DEFAULT '',            -- JSON: parámetros adicionales
+    comments TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
+    FOREIGN KEY (provenance_id) REFERENCES provenance(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_task_id) REFERENCES task_details(id) ON DELETE SET NULL
 );
 ```
 
-### Clase: `AdminManager`
+**Jerarquía de tareas:**
+```
+Provenance (punto de inicio del workflow)
+├── Task A  [parent_task_id = NULL]  ← análisis independiente
+│   └── Task A.1  [parent_task_id = A.id]  ← hijo de A
+│       └── Task A.1.1  [parent_task_id = A.1.id]
+└── Task B  [parent_task_id = NULL]  ← otro análisis independiente
+    └── Task B.1  [parent_task_id = B.id]
+```
+
+Nuevos métodos en `AdminManager`:
 
 ```python
-class AdminManager:
-    def __init__(self, plugin_dir):
-        self.db_path = os.path.join(plugin_dir, "admin.sqlite")
-        self.projects_dir = os.path.join(plugin_dir, "projects")
-        self.connection = None
+# -- Provenance --
+def create_provenance(self, assessment_id, name, description="") -> int
+def get_provenance_for_assessment(self, assessment_id) -> [dict]
+def delete_provenance(self, provenance_id)
 
-    # -- Conexion --
-    def connect(self)
-    def disconnect(self)
-    def _create_tables(self)
+# -- Task Details --
+def add_task(self, provenance_id, step_order, operation,
+             parent_task_id=None, input_tables=None, output_tables=None,
+             category="", duration_ms=0, parameters="", comments="") -> int
+def get_tasks_for_provenance(self, provenance_id) -> [dict]
+def get_child_tasks(self, parent_task_id) -> [dict]
+def update_task_duration(self, task_id, duration_ms)
 
-    # -- Projects CRUD --
-    def create_project(self, name, description="")    → int (project_id)
-        # 1. Generar UUID (uuid4)
-        # 2. Crear carpeta projects/ si no existe
-        # 3. Calcular db_path relativo: "projects/{sanitized_name}.sqlite"
-        # 4. INSERT en projects
-        # 5. Retornar project_id
-    def get_all_projects(self)                         → [dict]
-    def get_project(self, project_id)                  → dict | None
-    def get_project_by_name(self, name)                → dict | None
-    def delete_project(self, project_id)
-        # 1. Obtener db_path del proyecto
-        # 2. DELETE FROM projects (CASCADE borra assessments, layers, etc.)
-        # 3. Eliminar archivo .sqlite del proyecto en disco
-
-    # -- Assessments CRUD --
-    def create_assessment(self, project_id, name, description="", spatial_extent="") → int
-        # Generar UUID, INSERT
-    def get_assessments_for_project(self, project_id)  → [dict]
-    def assessment_name_exists(self, project_id, name) → bool
-    def delete_assessment(self, assessment_id)
-
-    # -- Assessment Layers --
-    def add_assessment_layer(self, assessment_id, layer_name, layer_type, geometry_type="")
-    def get_assessment_layers(self, assessment_id, layer_type=None) → [dict]
-        # layer_type=None retorna todas, 'input'|'output'|'reference' filtra
-    def remove_assessment_layers(self, assessment_id)
-
-    # -- Layer Visibility State --
-    def set_layer_visibility(self, assessment_id, layer_name, visible)
-        # INSERT OR REPLACE
-    def get_layer_visibility(self, assessment_id) → dict {layer_name: bool}
-    def get_visible_layers(self, assessment_id) → [str]
-
-    # -- Workflow Steps --
-    def add_workflow_step(self, assessment_id, step_order, operation, parameters="")
-    def get_workflow_steps(self, assessment_id) → [dict]
-
-    # -- Utilidades --
-    def get_project_db_path(self, project_id) → str (ruta absoluta al .sqlite)
+def build_task_tree(self, provenance_id) -> list:
+    """Retorna lista de tareas top-level con 'children' anidados."""
+    all_tasks = self.get_tasks_for_provenance(provenance_id)
+    task_map = {t['id']: dict(t, children=[]) for t in all_tasks}
+    roots = []
+    for t in task_map.values():
+        pid = t.get('parent_task_id')
+        if pid and pid in task_map:
+            task_map[pid]['children'].append(t)
+        else:
+            roots.append(t)
+    return roots
 ```
 
-### Cambios respecto a `metadata_manager.py`
+### 4B — TreeView 5 niveles (main_form.py)
 
-| Antes (`metadata_manager.py`) | Despues (`admin_manager.py`) |
-|---|---|
-| `metadata.db` | `admin.sqlite` |
-| `projects` sin UUID ni db_path | `projects` con UUID + db_path |
-| `assessments` con JSON fields | `assessments` sin JSON, + UUID, + spatial_extent |
-| JSON `assessment_layers` column | Tabla normalizada `assessment_layers` |
-| JSON `output_tables` column | Registrado en `assessment_layers` con `layer_type='output'` |
-| Sin visibilidad persistida | Tabla `layer_visibility_state` |
-| Sin workflow | Tabla `workflow_steps` |
+```
+Project A  [bold, tipo "project"]
+├── Base Layers  [italic, grupo no seleccionable]
+│   ├── landuse
+│   └── cities
+└── Assessments  [italic, grupo no seleccionable]
+    └── Flood_Risk  [tipo "assessment"]
+        └── Initial Analysis  [tipo "provenance"]
+            └── Union+Intersect  [tipo "task", top-level]
+                └── project_a__flood  [tipo "result", checkable ☑]
+```
 
-### Migracion de datos existentes
+#### `selected_path` dict (reemplaza `self.current_project_id`):
 
 ```python
-def migrate_from_metadata_db(self, old_db_path):
-    """Migrar datos de metadata.db al nuevo admin.sqlite."""
-    # 1. Leer projects de metadata.db
-    # 2. Para cada project: crear en admin.sqlite con UUID y db_path generados
-    # 3. Leer assessments y re-insertar con UUID
-    # 4. Parsear JSON assessment_layers/output_tables → insertar en assessment_layers
-    # 5. Renombrar/eliminar metadata.db
+self.selected_path = {
+    "project_id": None,
+    "assessment_id": None,
+    "provenance_id": None,
+    "task_id": None
+}
 ```
 
-### Verificacion Fase 1
-
-- [ ] `admin.sqlite` se crea con 5 tablas al iniciar plugin
-- [ ] Carpeta `projects/` se crea automaticamente
-- [ ] Projects se crean con UUID y db_path
-- [ ] Assessments se crean con UUID, sin campos JSON
-- [ ] `assessment_layers` almacena input/output/reference correctamente
-- [ ] `layer_visibility_state` persiste y recupera estado de checkboxes
-- [ ] `metadata_manager.py` se puede eliminar sin romper nada
-- [ ] Si existe `metadata.db`, se migran datos automaticamente
-
----
-
-## FASE 2 — project_XXX.sqlite (SpatiaLite)
-
-### Objetivo
-Crear `project_manager.py` que gestione bases de datos SpatiaLite individuales por proyecto.
-
-### Archivo: `project_manager.py` (NUEVO, reemplaza `database_manager.py`)
-
-### Schema del project DB
-
-```sql
--- Inicializar SpatiaLite
-SELECT InitSpatialMetaData();
-
--- Tabla 1: base_layers_registry
-CREATE TABLE IF NOT EXISTS base_layers_registry (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    layer_name TEXT UNIQUE NOT NULL,
-    geometry_type TEXT DEFAULT '',
-    srid INTEGER DEFAULT 4326,
-    source TEXT DEFAULT '',
-    feature_count INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
--- Tabla 2: assessment_results_metadata
-CREATE TABLE IF NOT EXISTS assessment_results_metadata (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    assessment_uuid TEXT NOT NULL,
-    output_layer TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    source_target TEXT DEFAULT '',
-    source_assessment TEXT DEFAULT '',
-    feature_count INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Las tablas espaciales (datos reales) se crean dinamicamente con `AddGeometryColumn()`.
-
-### Clase: `ProjectManager`
+#### Clase separada `EMDSTreeModel`:
 
 ```python
-class ProjectManager:
-    def __init__(self, db_path):
-        self.db_path = db_path  # ruta absoluta al project_XXX.sqlite
-        self.connection = None
-
-    # -- Conexion --
-    def connect(self)
-        # 1. sqlite3.connect(db_path)
-        # 2. connection.enable_load_extension(True)
-        # 3. connection.load_extension("mod_spatialite")
-        # 4. Si DB nueva: SELECT InitSpatialMetaData()
-        # 5. _create_tables()
-    def disconnect(self)
-    def _create_tables(self)
-
-    # -- Base Layers Registry --
-    def register_base_layer(self, layer_name, geometry_type, srid, source, feature_count)
-    def get_registered_layers(self) → [dict]
-    def is_layer_registered(self, layer_name) → bool
-    def unregister_layer(self, layer_name)
-
-    # -- Migracion de capas QGIS → SpatiaLite --
-    def migrate_layer(self, qgis_layer, table_name=None, progress_callback=None) → dict
-        # Equivalente a DatabaseManager.migrate_layer() pero para SpatiaLite:
-        # 1. sanitize_table_name()
-        # 2. CREATE TABLE con columnas del layer
-        # 3. AddGeometryColumn(table, 'geom', srid, geom_type, 'XY')
-        # 4. INSERT features con GeomFromText()
-        # 5. CreateSpatialIndex(table, 'geom')
-        # 6. Registrar en base_layers_registry
-        # Retorna stats: {inserted, errors, table_name}
-    def migrate_layers(self, layers_dict, progress_callback=None) → [dict]
-
-    # -- Consultas sobre tablas espaciales --
-    def table_exists(self, table_name) → bool
-    def drop_table(self, table_name)
-    def get_table_srid(self, table_name) → int
-    def get_table_geometry_type(self, table_name) → str
-
-    # -- Assessment Results --
-    def record_result(self, assessment_uuid, output_layer, operation,
-                      source_target="", source_assessment="", feature_count=0)
-    def get_results_for_assessment(self, assessment_uuid) → [dict]
-
-    # -- Utilidades --
-    def sanitize_table_name(self, layer_name) → str
-        # Misma logica que database_manager.py (preservar __ separator)
-    def get_spatialite_type(self, qgis_layer) → str
-        # Mapeo QgsWkbTypes → SpatiaLite types
+class EMDSTreeModel:
+    @staticmethod
+    def populate_tree(tree_widget, admin_manager, project_db_id=None):
+        """Poblar TreeWidget con jerarquía EMDS 3."""
+        tree_widget.clear()
+        projects = admin_manager.get_all_projects()
+        for project in projects:
+            project_item = QTreeWidgetItem([project['name']])
+            project_item.setData(0, Qt.UserRole, {'type': 'project', **project})
+            # Base Layers, Assessments → Provenance → Tasks → Results
+            ...
 ```
 
-### Equivalencias PostGIS → SpatiaLite
+#### Context menu por nivel:
 
-| PostGIS (`database_manager.py`) | SpatiaLite (`project_manager.py`) |
-|---|---|
-| `CREATE EXTENSION IF NOT EXISTS postgis` | `SELECT InitSpatialMetaData()` |
-| `GEOMETRY(type, srid)` inline en CREATE | `SELECT AddGeometryColumn(table, col, srid, type, dim)` |
-| `ST_GeomFromText(wkt, srid)` | `GeomFromText(wkt, srid)` |
-| `ST_AsText(geom)` | `AsText(geom)` |
-| `CREATE INDEX ... USING GIST` | `SELECT CreateSpatialIndex(table, col)` |
-| `information_schema.tables` | `sqlite_master WHERE type='table'` |
-| `geometry_columns` system table | `geometry_columns` (creada por InitSpatialMetaData) |
-| `psycopg2.connect(host, db, ...)` | `sqlite3.connect(path)` + `load_extension('mod_spatialite')` |
+```
+Project      → "New Assessment", "Delete Project"
+Assessment   → "Create Provenance", "Run Analysis Step", "Delete Assessment"
+Provenance   → "Add Task", "Edit", "Delete"
+Task         → "Add Sub-Task", "View Result", "Edit", "Delete"
+Result       → "Toggle Visibility"
+Base Layers  → "Register Layer"
+[vacío]      → "New Project"
+```
 
-### SpatiaLite en macOS / QGIS
+#### Dialogs especializados:
 
 ```python
-# QGIS incluye SpatiaLite. La extension se carga asi:
-import sqlite3
-
-conn = sqlite3.connect(db_path)
-conn.enable_load_extension(True)
-
-# macOS con QGIS:
-conn.load_extension("mod_spatialite")
-# Si falla, intentar ruta completa:
-# conn.load_extension("/Applications/QGIS.app/Contents/MacOS/lib/mod_spatialite")
+dialog = CreateProjectDialog(self.available_layers, self)
+dialog = CreateAssessmentDialog(available_layers=..., parent=self)
+dialog = CreateProvenanceDialog(parent=self)
+dialog = AddTaskDialog(provenance_id=..., parent_tasks=..., parent=self)
 ```
 
-### Verificacion Fase 2
-
-- [ ] `projects/` contiene archivos `.sqlite` creados al crear proyecto
-- [ ] SpatiaLite se inicializa correctamente (`InitSpatialMetaData`)
-- [ ] Capas QGIS se migran a SpatiaLite con geometria intacta
-- [ ] `base_layers_registry` registra cada capa migrada
-- [ ] `assessment_results_metadata` registra outputs con `assessment_uuid`
-- [ ] Indices espaciales se crean (`CreateSpatialIndex`)
-- [ ] `database_manager.py` se puede eliminar sin romper nada
-- [ ] Al borrar proyecto, el archivo `.sqlite` se elimina del disco
-
----
-
-## FASE 3 — Analisis Espacial con SpatiaLite
-
-### Objetivo
-Adaptar `spatial_analysis.py` para usar SpatiaLite en vez de PostGIS.
-
-### Archivo: `spatial_analysis_sketlite.py` (NUEVO, reemplaza `spatial_analysis.py`)
-
-### Equivalencias SQL
-
-```sql
--- INTERSECTION (PostGIS)
-ST_Intersection(a.geom, b.geom)
-a.geom && b.geom AND ST_Intersects(a.geom, b.geom)
-ST_Area(geom)
-ST_Perimeter(geom)
-GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
-ST_IsValid(geom)
-
--- INTERSECTION (SpatiaLite)
-Intersection(a.geom, b.geom)
-Intersects(a.geom, b.geom)        -- usa R-Tree si existe spatial index
-Area(geom)
-Perimeter(geom)
-GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')  -- igual
-IsValid(geom)                      -- disponible desde SpatiaLite 4.0+
-```
-
-### Clase: `SpatialAnalyzerLite`
-
-```python
-class SpatialAnalyzerLite:
-    def __init__(self, project_manager):
-        self.pm = project_manager  # ProjectManager con conexion activa
-
-    def analyze_and_create_layer(self, target_table, assessment_table, output_table,
-                                 layer_name=None, operation_type=OperationType.INTERSECT)
-        # 1. Validar tablas existen
-        # 2. Validar compatibilidad de geometria (SRID, tipo)
-        # 3. DROP TABLE IF EXISTS output
-        # 4. Ejecutar query (intersect/union)
-        # 5. Registrar resultado en assessment_results_metadata
-        # 6. Crear QGIS layer desde SpatiaLite
-        # 7. Retornar dict con total_count, layer, success
-
-    def _create_qgis_layer(self, table_name, layer_name=None)
-        # URI para SpatiaLite:
-        # uri = f"dbname='{db_path}' table='{table_name}' (geom)"
-        # layer = QgsVectorLayer(uri, layer_name, "spatialite")
-
-    def _build_intersect_query(self, target, assessment, output) → str
-    def _build_union_query(self, target, assessment, output) → str
-    def validate_geometry_compatibility(self, target, assessment) → dict
-```
-
-### Diferencia clave: creacion de QGIS layer
-
-```python
-# Antes (PostGIS):
-uri = QgsDataSourceUri()
-uri.setConnection("localhost", "5432", "wizard_db", "postgres", "user123")
-uri.setDataSource("public", table_name, "geom")
-layer = QgsVectorLayer(uri.uri(), name, "postgres")
-
-# Despues (SpatiaLite):
-uri = f"dbname='{self.pm.db_path}' table='{table_name}' (geom)"
-layer = QgsVectorLayer(uri, name, "spatialite")
-```
-
-### Verificacion Fase 3
-
-- [ ] Intersection genera resultados identicos a PostGIS
-- [ ] Union genera resultados identicos a PostGIS
-- [ ] Layers de salida se cargan correctamente en QGIS como `spatialite` provider
-- [ ] `assessment_results_metadata` se llena con cada operacion
-- [ ] `spatial_analysis.py` original se puede eliminar
-- [ ] No se requiere PostgreSQL para ejecutar el plugin
-
----
-
-## FASE 4 — Adaptar main_form.py (TreeView extendido)
-
-### Objetivo
-Conectar el TreeView a `admin_manager.py` y persistir visibilidad en `layer_visibility_state`.
-
-### Cambios en `main_form.py`
-
-```python
-# Antes:
-from .metadata_manager import MetadataManager
-
-# Despues:
-from .admin_manager import AdminManager
-```
-
-### TreeView extendido (4 niveles)
-
-```
-Project A  (bold, tipo "project")
-├── Base Layers  (italic, tipo "group", no seleccionable)
-│   ├── buildings_osm
-│   └── roads_primary
-└── Assessments  (italic, tipo "group", no seleccionable)
-    └── Flood_Risk  (checkable, tipo "assessment")
-        ├── ☑ CityPlan__Flood_intersect  (tipo "output_layer")
-        └── ☑ CityPlan__Flood_union      (tipo "output_layer")
-```
-
-### Visibilidad persistida
-
-```python
-# Al cargar TreeView:
-visibility = self.admin_manager.get_layer_visibility(assessment_id)
-for layer_name, visible in visibility.items():
-    item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
-
-# Al cambiar checkbox (itemChanged signal):
-self.admin_manager.set_layer_visibility(assessment_id, layer_name, checked)
-# + toggle en QGIS layer tree
-```
-
-### Context menu extendido (modelo EMDS 3)
-
-```
-Click derecho en Project     → "New Assessment", "Delete Project"
-Click derecho en Assessment  → "Create Provenance", "Run Analysis", "Delete Assessment"
-Click derecho en Provenance  → "Create Workflow Step", "Edit Provenance", "Delete Provenance"
-Click derecho en Workflow    → "Create Sub-Workflow Step", "View Result", "Edit Step", "Delete Step"
-Click derecho en Results     → "View in Engine Viewer", "Toggle Visibility"
-Click derecho en Base Layers → "Register Layer"
-Click derecho en vacio       → "New Project"
-```
-
-### Recomendaciones de refactor (basadas en prototipo EMDS 3)
-
-Adoptar los siguientes patrones del prototipo EMDS 3 para escalar el TreeView:
-
-1. **`selected_path` dict** — Reemplazar `self.current_project_id` (escalar) por un dict
-   que trackee la seleccion completa del arbol:
-   ```python
-   self.selected_path = {
-       "project_id": None,
-       "assessment_id": None,
-       "provenance_id": None,
-       "workflow_id": None
-   }
-   ```
-
-2. **`EMDSTreeModel` separado** — Extraer la logica de poblacion del tree en su propia clase:
-   ```python
-   class EMDSTreeModel:
-       @staticmethod
-       def populate_tree(tree_widget, project_manager):
-           # Logica de poblacion separada del formulario
-   ```
-
-3. **Dialogs especializados** — Reemplazar `QInputDialog` con dialogs que reciban
-   `available_layers` y capturen mas datos:
-   ```python
-   dialog = CreateProjectDialog(self.available_layers, self)
-   project = dialog.get_project()
-
-   dialog = CreateAssessmentDialog(self.available_layers, self)
-   assessment = dialog.get_assessment()
-
-   dialog = CreateProvenanceDialog(self)
-   provenance = dialog.get_provenance()
-   ```
-
-4. **Senales Qt** — Emitir senales al crear/eliminar entidades para desacoplar componentes:
-   ```python
-   self.project_created.emit(project)
-   self.assessment_created.emit(assessment)
-   ```
-
-5. **TreeView completo EMDS 3** (5+ niveles):
-   ```
-   Project A  (bold, tipo "project")
-   ├── Base Layers  (italic, grupo)
-   │   ├── buildings_osm
-   │   └── roads_primary
-   └── Assessments  (italic, grupo)
-       └── Flood_Risk  (tipo "assessment")
-           └── Water_Analysis  (tipo "provenance")
-               ├── Step 1: Buffer  (tipo "workflow")
-               │   └── buffer_result  (tipo "results", checkable)
-               └── Step 2: Intersect  (tipo "workflow")
-                   └── intersect_result  (tipo "results", checkable)
-   ```
-
-### Verificacion Fase 4
-
-- [ ] TreeView muestra niveles EMDS 3 (Project → Assessment → Provenance → Workflow → Results)
+### Verificación Fase 4
+- [ ] TreeView muestra 5 niveles: Project → Assessment → Provenance → Task → Result
 - [ ] Base Layers se leen de `base_layers_registry` del project DB
 - [ ] Output layers se leen de `assessment_layers` del admin DB
-- [ ] Checkboxes persisten al cerrar y reabrir el formulario
-- [ ] Context menu funciona en cada nivel del arbol
-- [ ] Seleccionar assessment muestra sus detalles (layers, workflow steps)
-- [ ] `selected_path` dict trackea la seleccion completa
-- [ ] `EMDSTreeModel` separado de `main_form.py`
-- [ ] Dialogs especializados para Project, Assessment, Provenance
+- [ ] Checkboxes persisten en `layer_visibility_state`
+- [ ] Context menu funciona en cada nivel
+- [ ] `selected_path` trackea la selección completa
+- [ ] `EMDSTreeModel` separado del formulario
+- [ ] Tablas `provenance` y `task_details` creadas en `admin.sqlite`
+- [ ] `build_task_tree()` retorna árbol jerárquico correcto
 
 ---
 
-## FASE 5 — Adaptar assessment_wizard_dialog.py
+## FASE 5 — Wizard: flujo completo corregido ⏳ PENDIENTE
 
 ### Objetivo
-Conectar el wizard al nuevo flujo de datos (admin + project DBs).
+Conectar el wizard al flujo correcto: 1 tabla base final, registro de provenance,
+y columnas extensibles para análisis posteriores.
 
-### Cambios principales
-
-```python
-# Constructor — recibe ambos managers
-def __init__(self, parent=None, iface=None, project_id="",
-             admin_manager=None, project_manager=None,
-             project_db_id=None, assessment_uuid=None):
-
-# En accept():
-# 1. Validar duplicados via admin_manager.assessment_name_exists()
-# 2. Crear assessment en admin_manager.create_assessment() → obtener uuid
-# 3. Registrar input layers en admin_manager.add_assessment_layer(type='input')
-# 4. Migrar capas a SpatiaLite via project_manager.migrate_layer()
-# 5. Ejecutar analisis via SpatialAnalyzerLite
-# 6. Registrar output layers en admin_manager.add_assessment_layer(type='output')
-# 7. Registrar workflow_steps en admin_manager
-# 8. Registrar results en project_manager.record_result()
-```
-
-### Flujo de datos en accept()
+### Flujo en `accept()` post-ajustes
 
 ```
 Usuario completa wizard
 │
-├── admin.sqlite:
-│   ├── INSERT assessment (uuid, project_id, name, description, spatial_extent)
-│   ├── INSERT assessment_layers (assessment_id, 'buildings', 'input')
-│   ├── INSERT assessment_layers (assessment_id, 'CityPlan__Flood_intersect', 'output')
-│   ├── INSERT assessment_layers (assessment_id, 'CityPlan__Flood_union', 'output')
-│   ├── INSERT layer_visibility_state (assessment_id, layer, visible=1)
-│   └── INSERT workflow_steps (assessment_id, 1, 'intersect', params)
-│
 ├── project_XXX.sqlite:
-│   ├── Tabla buildings (migrada con geometria)
-│   ├── Tabla CityPlan__Flood_intersect (resultado)
-│   ├── Tabla CityPlan__Flood_union (resultado)
-│   ├── INSERT base_layers_registry (buildings, POLYGON, 4326, source)
-│   └── INSERT assessment_results_metadata (uuid, output, operation)
+│   ├── Migrar target_layer         → tabla 'landuse'
+│   ├── Migrar assessment_layer     → tabla 'cities'
+│   ├── Intersection(landuse,cities) → TEMPORAL: project_a__flood_tmp_intersect
+│   ├── Union(landuse,cities)        → TEMPORAL: project_a__flood_tmp_union
+│   ├── rename(_tmp_union)           → FINAL: project_a__flood  ✅
+│   ├── DROP _tmp_intersect
+│   └── INSERT base_layers_registry (landuse, cities)
+│
+├── admin.sqlite:
+│   ├── INSERT assessments   (uuid, project_id, 'flood', ...)
+│   ├── INSERT assessment_layers (landuse → input, cities → input)
+│   ├── INSERT assessment_layers (project_a__flood → output)  ← 1 sola entrada
+│   ├── INSERT layer_visibility_state (project_a__flood, visible=1)
+│   ├── INSERT provenance    (assessment_id, 'Initial Analysis')
+│   └── INSERT task_details  (provenance_id, 'union+intersect',
+│                             input=['landuse','cities'],
+│                             output=['project_a__flood'])
 │
 └── QGIS:
-    ├── Layer CityPlan__Flood_intersect (spatialite provider)
-    └── Layer CityPlan__Flood_union (spatialite provider)
+    └── Grupo "Output Layers"
+        └── Layer project_a__flood  (spatialite provider) ✅ — 1 sola capa
 ```
 
-### Verificacion Fase 5
+### Cambios en `assessment_executor.py`
 
-- [ ] Wizard crea assessment con UUID en admin.sqlite
-- [ ] Capas se migran a SpatiaLite (no PostgreSQL)
-- [ ] Resultados se registran en ambas DBs
-- [ ] Layers de salida se cargan en QGIS como spatialite
-- [ ] TreeView se actualiza automaticamente al cerrar wizard
-- [ ] Credenciales PostgreSQL hardcoded ya no se usan
-- [ ] `database_manager.py` y `spatial_analysis.py` se eliminan
+Después de ejecutar el análisis, registrar en provenance:
+
+```python
+def execute_spatial_assessment(self, ...):
+    ...
+    # Registrar provenance + task
+    self._record_provenance(assessment_id, output_tables, target_layer, assessment_layers)
+    ...
+
+def _record_provenance(self, assessment_id, output_tables,
+                        target_layer, assessment_layers):
+    if not self.admin_manager:
+        return
+    provenance_id = self.admin_manager.create_provenance(
+        assessment_id=assessment_id,
+        name="Initial Assessment",
+        description="Base spatial analysis: union + intersection"
+    )
+    import json
+    self.admin_manager.add_task(
+        provenance_id=provenance_id,
+        step_order=1,
+        operation="union+intersect",
+        category="spatial_analysis",
+        input_tables=json.dumps([target_layer.name()] +
+                                [al.name() for al in assessment_layers]),
+        output_tables=json.dumps(output_tables),
+        added_to_map=True
+    )
+```
+
+### Tabla base extensible — análisis posteriores
+
+Al ejecutar un análisis posterior (CDP, NetWeaver, LPA), añadir columnas a la tabla base:
+
+```python
+# Ejemplo de uso (análisis posterior, fuera del wizard):
+pm.add_column_to_table('project_a__flood', 'cdp_priority_score', 'REAL')
+pm.update_column_values('project_a__flood', 'cdp_priority_score', {1: 0.8, 2: 0.5, ...})
+
+# Registrar en task_details como hijo del task anterior:
+admin_manager.add_task(
+    provenance_id=provenance_id,
+    step_order=2,
+    operation="CDP",
+    parent_task_id=initial_task_id,  # hijo del task de intersect/union
+    input_tables=json.dumps(['project_a__flood']),
+    output_tables=json.dumps(['project_a__flood']),  # misma tabla, nueva columna
+)
+```
+
+### Verificación Fase 5
+- [ ] Wizard produce exactamente 1 capa QGIS por assessment
+- [ ] La tabla base se llama `project_x__assessment_name` (sin sufijos)
+- [ ] Tablas temporales `_tmp_*` no persisten en `.sqlite`
+- [ ] Provenance + task_details se registran en admin.sqlite al finalizar wizard
+- [ ] TreeView se actualiza al cerrar wizard (mostrar nuevo assessment + provenance)
+- [ ] Tabla base acepta columnas adicionales sin perder datos existentes
 
 ---
 
-## FASE 6 — Limpieza y eliminacion de legacy
+## FASE 6 — Limpieza legacy + metadatos enriquecidos ⏳ PENDIENTE
 
 ### Archivos a eliminar
 
-| Archivo | Razon |
-|---|---|
-| `metadata_manager.py` | Reemplazado por `admin_manager.py` |
-| `metadata.db` | Migrado a `admin.sqlite` (con script de migracion) |
-| `database_manager.py` | Reemplazado por `project_manager.py` |
-| `spatial_analysis.py` | Reemplazado por `spatial_analysis_sketlite.py` |
+| Archivo | Reemplazado por |
+|---------|----------------|
+| `metadata_manager.py` | `admin_manager.py` |
+| `database_manager.py` | `project_manager.py` |
+| `spatial_analysis.py` | `spatial_analysis_spatialite.py` |
+| `SPATIAL_ANALYSIS_README.md` | Este roadmap |
+| `projects/project_1.sqlite` (legacy) | Migrar o eliminar |
 
-### Imports a actualizar
+### Campos de metadatos adicionales (opcionales, post-MVP)
 
-| Archivo | Import viejo | Import nuevo |
-|---|---|---|
-| `main_form.py` | `from .metadata_manager import MetadataManager` | `from .admin_manager import AdminManager` |
-| `assessment_wizard_dialog.py` | `from .database_manager import DatabaseManager` | `from .project_manager import ProjectManager` |
-| `assessment_wizard_dialog.py` | `from .spatial_analysis import SpatialAnalyzer` | `from .spatial_analysis_sketlite import SpatialAnalyzerLite` |
-| `assessment_wizard.py` | (sin cambios directos) | Pasa `plugin_dir` como antes |
+Añadir cuando se requiera trazabilidad completa:
 
-### Verificacion Fase 6
+```sql
+-- En projects:
+ALTER TABLE projects ADD COLUMN modified_at TEXT DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE projects ADD COLUMN map_document TEXT DEFAULT '';   -- nombre del .qgs
+ALTER TABLE projects ADD COLUMN raster_sources TEXT DEFAULT ''; -- JSON: rutas rasters
 
-- [ ] Plugin funciona sin PostgreSQL instalado
-- [ ] No quedan imports a archivos eliminados
-- [ ] No quedan credenciales hardcoded en el codigo
+-- En assessment_layers:
+ALTER TABLE assessment_layers ADD COLUMN source_path TEXT DEFAULT '';
+ALTER TABLE assessment_layers ADD COLUMN symbology TEXT DEFAULT '';  -- JSON o path
+ALTER TABLE assessment_layers ADD COLUMN comments TEXT DEFAULT '';
+ALTER TABLE assessment_layers ADD COLUMN is_raster INTEGER DEFAULT 0;
+ALTER TABLE assessment_layers ADD COLUMN raster_path TEXT DEFAULT '';
+
+-- En base_layers_registry (project DB):
+ALTER TABLE base_layers_registry ADD COLUMN symbology TEXT DEFAULT '';
+ALTER TABLE base_layers_registry ADD COLUMN comments TEXT DEFAULT '';
+```
+
+### Verificación Fase 6
+- [ ] Plugin funciona sin PostgreSQL
+- [ ] Sin imports a archivos eliminados
+- [ ] Sin credenciales hardcoded
 - [ ] `metadata.db` migrada o respaldada
-- [ ] Tests pasan (si existen)
+- [ ] Tests de integración pasan (creación proyecto → assessment → análisis → TreeView)
 
 ---
 
-## Orden de implementacion
+## Orden de implementación
 
 ```
-FASE 1 ─── admin_manager.py ──────────────────────── Base de todo
-   │
-FASE 2 ─── project_manager.py ────────────────────── Datos espaciales
-   │
-FASE 3 ─── spatial_analysis_sketlite.py ──────────── Motor de analisis
-   │
-FASE 4 ─── main_form.py (TreeView) ───────────────── UI conectada
-   │
-FASE 5 ─── assessment_wizard_dialog.py ───────────── Flujo completo
-   │
-FASE 6 ─── Limpieza legacy ───────────────────────── Produccion
+FASE 2B ── rename_table(), add_column(), cleanup_temp(), fix 3D
+    │       [Prerequisito para Fase 3B]
+    │
+FASE 3B ── Output: 1 tabla final (executor + analyzer)
+    │       [Prerequisito para Fase 4 — corrige el flujo antes de TreeView]
+    │
+FASE 4  ── TreeView EMDS 3 + tablas provenance/task_details
+    │       [Depende de 2B + 3B]
+    │
+FASE 5  ── Wizard flujo completo + registro provenance
+    │       [Depende de Fase 4]
+    │
+FASE 6  ── Limpieza legacy + campos opcionales
+            [Al final, cuando todo funciona]
 ```
-
-Cada fase es **testeable de forma independiente** antes de avanzar a la siguiente.
 
 ---
 
 ## Resumen de archivos
 
-| Archivo | Accion | Fase |
-|---|---|---|
-| `admin_manager.py` | CREAR | 1 |
-| `project_manager.py` | CREAR | 2 |
-| `spatial_analysis_sketlite.py` | CREAR | 3 |
-| `main_form.py` | MODIFICAR | 4 |
-| `assessment_wizard_dialog.py` | MODIFICAR | 5 |
-| `assessment_wizard.py` | MODIFICAR (menor) | 5 |
+| Archivo | Acción | Fase |
+|---------|--------|------|
+| `admin_manager.py` | MODIFICAR: tablas provenance + task_details | 4 |
+| `project_manager.py` | MODIFICAR: rename_table, add_column, cleanup_temp, 3D fix | 2B |
+| `spatial_analysis_spatialite.py` | MODIFICAR: parámetro add_to_qgis | 3B |
+| `assessment_executor.py` | MODIFICAR: flujo 1 tabla final + provenance | 3B, 5 |
+| `main_form.py` | MODIFICAR: TreeView EMDS 3, EMDSTreeModel, selected_path | 4 |
+| `assessment_wizard_dialog.py` | MODIFICAR: flujo corregido | 5 |
 | `metadata_manager.py` | ELIMINAR | 6 |
 | `database_manager.py` | ELIMINAR | 6 |
 | `spatial_analysis.py` | ELIMINAR | 6 |
