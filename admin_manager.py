@@ -101,6 +101,42 @@ class AdminManager:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS provenance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT UNIQUE NOT NULL,
+                assessment_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS task_details (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT UNIQUE NOT NULL,
+                provenance_id INTEGER NOT NULL,
+                parent_task_id INTEGER DEFAULT NULL,
+                step_order INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                category TEXT DEFAULT '',
+                input_tables TEXT DEFAULT '',
+                output_tables TEXT DEFAULT '',
+                db_type TEXT DEFAULT 'spatialite',
+                added_to_map INTEGER DEFAULT 1,
+                scenario TEXT DEFAULT '',
+                symbology TEXT DEFAULT '',
+                duration_ms INTEGER DEFAULT 0,
+                parameters TEXT DEFAULT '',
+                comments TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (provenance_id) REFERENCES provenance(id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_task_id) REFERENCES task_details(id) ON DELETE SET NULL
+            )
+        """)
+
         self.connection.commit()
         cursor.close()
 
@@ -399,6 +435,159 @@ class AdminManager:
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------ #
+    #  Provenance CRUD
+    # ------------------------------------------------------------------ #
+
+    def create_provenance(self, assessment_id, name, description=""):
+        """Insert a new provenance record. Returns the new provenance id."""
+        prov_uuid = str(uuid.uuid4())
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """INSERT INTO provenance (uuid, assessment_id, name, description)
+               VALUES (?, ?, ?, ?)""",
+            (prov_uuid, assessment_id, name, description)
+        )
+        self.connection.commit()
+        prov_id = cursor.lastrowid
+        cursor.close()
+        return prov_id
+
+    def get_provenance_for_assessment(self, assessment_id):
+        """Return list of provenance dicts for an assessment, ordered by creation."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """SELECT id, uuid, assessment_id, name, description, created_at
+               FROM provenance WHERE assessment_id = ? ORDER BY created_at""",
+            (assessment_id,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            {
+                'id': r[0], 'uuid': r[1], 'assessment_id': r[2],
+                'name': r[3], 'description': r[4], 'created_at': r[5]
+            }
+            for r in rows
+        ]
+
+    def delete_provenance(self, provenance_id):
+        """Delete a provenance record (cascades to task_details)."""
+        cursor = self.connection.cursor()
+        cursor.execute("DELETE FROM provenance WHERE id = ?", (provenance_id,))
+        self.connection.commit()
+        cursor.close()
+
+    # ------------------------------------------------------------------ #
+    #  Task Details CRUD
+    # ------------------------------------------------------------------ #
+
+    def add_task(self, provenance_id, step_order, operation,
+                 parent_task_id=None, input_tables=None, output_tables=None,
+                 category="", duration_ms=0, parameters="", comments="",
+                 added_to_map=True):
+        """Insert a task_details record. Returns the new task id.
+
+        Args:
+            provenance_id: int
+            step_order: int
+            operation: str  e.g. 'union+intersect', 'CDP', 'NetWeaver'
+            parent_task_id: int or None (None = top-level task)
+            input_tables: list of str  (serialized to JSON)
+            output_tables: list of str (serialized to JSON)
+            category: str
+            duration_ms: int
+            parameters: str (JSON or free text)
+            comments: str
+            added_to_map: bool
+        """
+        task_uuid = str(uuid.uuid4())
+        input_json = json.dumps(input_tables) if input_tables is not None else ''
+        output_json = json.dumps(output_tables) if output_tables is not None else ''
+
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """INSERT INTO task_details
+               (uuid, provenance_id, parent_task_id, step_order, operation,
+                category, input_tables, output_tables, added_to_map,
+                duration_ms, parameters, comments)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_uuid, provenance_id, parent_task_id, step_order, operation,
+             category, input_json, output_json, 1 if added_to_map else 0,
+             duration_ms, parameters, comments)
+        )
+        self.connection.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        return task_id
+
+    def get_tasks_for_provenance(self, provenance_id):
+        """Return all task dicts for a provenance, ordered by step_order."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """SELECT id, uuid, provenance_id, parent_task_id, step_order, operation,
+                      category, input_tables, output_tables, db_type, added_to_map,
+                      scenario, duration_ms, parameters, comments, created_at
+               FROM task_details WHERE provenance_id = ? ORDER BY step_order""",
+            (provenance_id,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [self._row_to_task(r) for r in rows]
+
+    def get_child_tasks(self, parent_task_id):
+        """Return task dicts that are direct children of the given task."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """SELECT id, uuid, provenance_id, parent_task_id, step_order, operation,
+                      category, input_tables, output_tables, db_type, added_to_map,
+                      scenario, duration_ms, parameters, comments, created_at
+               FROM task_details WHERE parent_task_id = ? ORDER BY step_order""",
+            (parent_task_id,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [self._row_to_task(r) for r in rows]
+
+    def update_task_duration(self, task_id, duration_ms):
+        """Update the duration_ms field for a task."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "UPDATE task_details SET duration_ms = ? WHERE id = ?",
+            (duration_ms, task_id)
+        )
+        self.connection.commit()
+        cursor.close()
+
+    def build_task_tree(self, provenance_id):
+        """Return top-level tasks with nested 'children' lists.
+
+        Returns:
+            list[dict]: Each dict is a task with a 'children' key containing
+                        its child tasks recursively.
+        """
+        all_tasks = self.get_tasks_for_provenance(provenance_id)
+        task_map = {t['id']: dict(t, children=[]) for t in all_tasks}
+        roots = []
+        for t in task_map.values():
+            pid = t.get('parent_task_id')
+            if pid and pid in task_map:
+                task_map[pid]['children'].append(t)
+            else:
+                roots.append(t)
+        return roots
+
+    def _row_to_task(self, r):
+        """Convert a task_details DB row tuple to a dict."""
+        return {
+            'id': r[0], 'uuid': r[1], 'provenance_id': r[2],
+            'parent_task_id': r[3], 'step_order': r[4], 'operation': r[5],
+            'category': r[6], 'input_tables': r[7], 'output_tables': r[8],
+            'db_type': r[9], 'added_to_map': bool(r[10]),
+            'scenario': r[11], 'duration_ms': r[12],
+            'parameters': r[13], 'comments': r[14], 'created_at': r[15]
+        }
 
     # ------------------------------------------------------------------ #
     #  Utilities

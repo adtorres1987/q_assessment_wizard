@@ -34,9 +34,9 @@ class SpatialAnalyzerLite:
 
     def analyze_and_create_layer(self, target_table, assessment_table, output_table,
                                  layer_name=None, operation_type=OperationType.BOTH,
-                                 group_name=None):
+                                 group_name=None, add_to_qgis=True):
         """
-        Perform spatial analysis between target and assessment layers and create QGIS layer.
+        Perform spatial analysis between target and assessment layers.
 
         Args:
             target_table: Name of target layer table in SpatiaLite
@@ -44,6 +44,9 @@ class SpatialAnalyzerLite:
             output_table: Name of output table to create
             layer_name: Name for the new QGIS layer (defaults to output_table)
             operation_type: Type of operation (INTERSECT, UNION, or BOTH)
+            group_name: Optional layer tree group name for the QGIS layer
+            add_to_qgis: If False, only create the SpatiaLite table without adding
+                         a layer to QGIS (used for intermediate/temporary tables)
 
         Returns:
             dict: Results including total_count, output_table, layer, success
@@ -125,15 +128,17 @@ class SpatialAnalyzerLite:
 
             cursor.close()
 
-            # Create QGIS layer from SpatiaLite table
-            layer = self._create_qgis_layer(output_table, layer_name, group_name)
+            # Optionally create QGIS layer (skip for intermediate/temporary tables)
+            layer = None
+            if add_to_qgis:
+                layer = self._create_qgis_layer(output_table, layer_name, group_name)
 
             return {
                 'total_count': total_count,
                 'output_table': output_table,
                 'layer': layer,
                 'layer_name': layer.name() if layer else None,
-                'success': layer is not None
+                'success': True
             }
 
         except Exception as e:

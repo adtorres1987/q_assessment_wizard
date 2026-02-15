@@ -35,11 +35,11 @@ assessment_wizard/
 | 2 | project_XXX.sqlite + ProjectManager | ✅ Completo |
 | 3 | SpatialAnalyzerLite | ✅ Completo |
 | SOLID | Refactor assessment_wizard_dialog.py | ✅ Completo |
-| 2B | Ajustes a ProjectManager (nuevos métodos) | ⏳ Pendiente |
-| 3B | Output corregido: 1 tabla final | ⏳ Pendiente |
-| 4 | TreeView extendido + modelo Provenance | ⏳ Pendiente |
-| 5 | Wizard: flujo completo corregido | ⏳ Pendiente |
-| 6 | Limpieza legacy + metadatos enriquecidos | ⏳ Pendiente |
+| 2B | Ajustes a ProjectManager (nuevos métodos) | ✅ Completo |
+| 3B | Output corregido: 1 tabla final | ✅ Completo |
+| 4 | TreeView extendido + modelo Provenance | ✅ Completo |
+| 5 | Wizard: flujo completo corregido | ✅ Completo |
+| 6 | Limpieza legacy + metadatos enriquecidos | ✅ Completo |
 
 ---
 
@@ -496,7 +496,7 @@ dialog = AddTaskDialog(provenance_id=..., parent_tasks=..., parent=self)
 
 ---
 
-## FASE 5 — Wizard: flujo completo corregido ⏳ PENDIENTE
+## FASE 5 — Wizard: flujo completo corregido ✅ COMPLETO
 
 ### Objetivo
 Conectar el wizard al flujo correcto: 1 tabla base final, registro de provenance,
@@ -594,7 +594,7 @@ admin_manager.add_task(
 
 ---
 
-## FASE 6 — Limpieza legacy + metadatos enriquecidos ⏳ PENDIENTE
+## FASE 6 — Limpieza legacy + metadatos enriquecidos ✅ COMPLETO
 
 ### Archivos a eliminar
 

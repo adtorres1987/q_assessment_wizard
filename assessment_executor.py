@@ -117,6 +117,10 @@ class AssessmentExecutor:
                                      parent_widget=None):
         """Case 2: Target + assessment layers -- spatial analysis via SpatiaLite.
 
+        Produces ONE final base table per assessment layer pair. Intersection and
+        union are computed as temporary tables; the union is renamed as the final
+        base table and the intersection temporary is dropped.
+
         Args:
             assessment_name: str
             target_layer: QgsVectorLayer
@@ -145,79 +149,142 @@ class AssessmentExecutor:
                 pm.migrate_layer(al, at)
 
         analyzer = SpatialAnalyzerLite(pm)
-        results = []
+        output_entries = []  # list of {'table': str, 'layer': QgsVectorLayer}
 
         for assessment_layer in assessment_layers:
             assessment_table = pm.sanitize_table_name(assessment_layer.name())
 
-            # Create base output name
+            # Base name for the final output table
             if len(assessment_layers) == 1:
                 base_name = f"{self.project_id}__{assessment_name}"
             else:
-                base_name = f"{self.project_id}__{assessment_name}_{assessment_layer.name().replace(' ', '_')}"
+                safe = assessment_layer.name().replace(' ', '_')
+                base_name = f"{self.project_id}__{assessment_name}_{safe}"
 
-            # Perform Intersection
-            output_table_intersect = pm.sanitize_table_name(f"{base_name}_intersection")
-            result_intersect = analyzer.analyze_and_create_layer(
-                target_table,
-                assessment_table,
-                output_table_intersect,
-                layer_name=f"{base_name}_intersection",
+            tmp_intersect = pm.sanitize_table_name(f"{base_name}_tmp_intersect")
+            tmp_union     = pm.sanitize_table_name(f"{base_name}_tmp_union")
+            final_table   = pm.sanitize_table_name(base_name)
+
+            # Drop final table if it already exists (re-run scenario)
+            if pm.table_exists(final_table):
+                pm.drop_table(final_table)
+
+            # Step 1: Intersection → temporary SpatiaLite table only
+            analyzer.analyze_and_create_layer(
+                target_table, assessment_table, tmp_intersect,
                 operation_type=OperationType.INTERSECT,
-                group_name=self.OUTPUT_GROUP_NAME
+                add_to_qgis=False
             )
-            results.append(result_intersect)
 
-            # Perform Union
-            output_table_union = pm.sanitize_table_name(f"{base_name}_union")
-            result_union = analyzer.analyze_and_create_layer(
-                target_table,
-                assessment_table,
-                output_table_union,
-                layer_name=f"{base_name}_union",
+            # Step 2: Union → temporary SpatiaLite table only
+            analyzer.analyze_and_create_layer(
+                target_table, assessment_table, tmp_union,
                 operation_type=OperationType.UNION,
-                group_name=self.OUTPUT_GROUP_NAME
+                add_to_qgis=False
             )
-            results.append(result_union)
+
+            # Step 3: Promote union table as the final base table
+            pm.rename_table(tmp_union, final_table)
+
+            # Step 4: Drop intersection temporary
+            pm.drop_table(tmp_intersect)
+
+            # Step 5: Load the final table as a single QGIS layer
+            layer = analyzer._create_qgis_layer(
+                final_table, base_name, group_name=self.OUTPUT_GROUP_NAME
+            )
+            output_entries.append({'table': final_table, 'layer': layer})
 
         pm.disconnect()
 
-        # Show success message
-        if results:
-            total_features = sum(r['total_count'] for r in results)
-            layer_names = "\n• ".join(r['layer'].name() for r in results)
-
+        if output_entries:
+            layer_names = "\n• ".join(e['layer'].name() for e in output_entries)
             QMessageBox.information(
                 parent_widget,
-                "Analysis Complete",
-                f"Spatial analysis completed successfully!\n\n"
-                f"Created layer(s):\n• {layer_names}\n\n"
-                f"Total features: {total_features}"
+                "Assessment Complete",
+                f"Assessment created successfully!\n\n"
+                f"Base layer(s):\n• {layer_names}"
             )
 
         return {
             'assessment_name': assessment_name,
             'target_layer': target_layer.name(),
             'assessment_layers': [l.name() for l in assessment_layers],
-            'output_tables': [r['layer'].name() for r in results] if results else [],
+            'output_tables': [e['table'] for e in output_entries],
             'description': description
         }
 
     def record_assessment(self, wizard_results):
         """Record assessment in the admin metadata database.
 
+        Creates the assessment, sets initial layer visibility, and — for
+        spatial assessments — adds a provenance + task_details record so the
+        TreeView can show the full EMDS 3 hierarchy.
+
         Args:
             wizard_results: dict with assessment_name, target_layer, etc.
+
+        Returns:
+            int or None: the new assessment_id, or None on failure / no admin_manager
         """
-        if self.admin_manager and self.project_db_id is not None:
-            try:
-                self.admin_manager.create_assessment(
-                    project_id=self.project_db_id,
-                    name=wizard_results.get('assessment_name', ''),
-                    description=wizard_results.get('description', ''),
-                    target_layer=wizard_results.get('target_layer', ''),
-                    assessment_layers=wizard_results.get('assessment_layers', []),
-                    output_tables=wizard_results.get('output_tables', [])
+        if not (self.admin_manager and self.project_db_id is not None):
+            return None
+
+        try:
+            assessment_id = self.admin_manager.create_assessment(
+                project_id=self.project_db_id,
+                name=wizard_results.get('assessment_name', ''),
+                description=wizard_results.get('description', ''),
+                target_layer=wizard_results.get('target_layer', ''),
+                assessment_layers=wizard_results.get('assessment_layers', []),
+                output_tables=wizard_results.get('output_tables', [])
+            )
+
+            # Persist default visibility (visible=1) for each output table
+            for table_name in wizard_results.get('output_tables', []):
+                self.admin_manager.set_layer_visibility(assessment_id, table_name, True)
+
+            # For spatial assessments record provenance + initial task
+            if wizard_results.get('assessment_layers'):
+                self._record_provenance(
+                    assessment_id=assessment_id,
+                    output_tables=wizard_results.get('output_tables', []),
+                    target_layer_name=wizard_results.get('target_layer', ''),
+                    assessment_layer_names=wizard_results.get('assessment_layers', [])
                 )
-            except Exception as e:
-                print(f"Warning: Could not record assessment in metadata: {e}")
+
+            return assessment_id
+
+        except Exception as e:
+            print(f"Warning: Could not record assessment in metadata: {e}")
+            return None
+
+    def _record_provenance(self, assessment_id, output_tables,
+                           target_layer_name, assessment_layer_names):
+        """Create a provenance + task_details entry for a completed spatial analysis.
+
+        Args:
+            assessment_id: int
+            output_tables: list[str] — final output table name(s)
+            target_layer_name: str
+            assessment_layer_names: list[str]
+        """
+        if not self.admin_manager:
+            return
+        try:
+            provenance_id = self.admin_manager.create_provenance(
+                assessment_id=assessment_id,
+                name="Initial Assessment",
+                description="Base spatial analysis: union + intersection"
+            )
+            self.admin_manager.add_task(
+                provenance_id=provenance_id,
+                step_order=1,
+                operation="union+intersect",
+                category="spatial_analysis",
+                input_tables=[target_layer_name] + assessment_layer_names,
+                output_tables=output_tables,
+                added_to_map=True
+            )
+        except Exception as e:
+            print(f"Warning: Could not record provenance: {e}")
