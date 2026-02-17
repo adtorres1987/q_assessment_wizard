@@ -282,6 +282,7 @@ class AssessmentExecutor:
                 step_order=1,
                 operation="union+intersect",
                 category="spatial_analysis",
+                engine_type="spatialite",
                 input_tables=[target_layer_name] + assessment_layer_names,
                 output_tables=output_tables,
                 added_to_map=True

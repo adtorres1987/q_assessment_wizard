@@ -3,6 +3,9 @@
 Admin Manager Module
 Manages project and assessment metadata in a central admin.sqlite database.
 Replaces metadata_manager.py with normalized schema, UUIDs, and project DB paths.
+
+Schema v2: adapted from EMDS 8 (emdsInfo.Sqlite) — adds engine_type, is_scenario,
+soft-delete (is_deleted), base_layer_names, spatial_references, and app_settings.
 """
 
 import sqlite3
@@ -30,6 +33,7 @@ class AdminManager:
         self.connection = sqlite3.connect(self.db_path)
         self.connection.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
+        self._migrate_schema()
         os.makedirs(self.projects_dir, exist_ok=True)
 
     def disconnect(self):
@@ -39,7 +43,7 @@ class AdminManager:
             self.connection = None
 
     def _create_tables(self):
-        """Create all admin tables if they do not exist."""
+        """Create all admin tables if they do not exist (new-database schema)."""
         cursor = self.connection.cursor()
 
         cursor.execute("""
@@ -49,7 +53,13 @@ class AdminManager:
                 name TEXT NOT NULL UNIQUE,
                 description TEXT DEFAULT '',
                 db_path TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                is_deleted INTEGER DEFAULT 0,
+                base_layer_names TEXT DEFAULT '',
+                db_type TEXT DEFAULT 'spatialite',
+                qgs_project_file TEXT DEFAULT '',
+                db_connection_string TEXT DEFAULT '',
+                workspace_paths TEXT DEFAULT ''
             )
         """)
 
@@ -63,6 +73,7 @@ class AdminManager:
                 target_layer TEXT DEFAULT '',
                 spatial_extent TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                is_deleted INTEGER DEFAULT 0,
                 UNIQUE(project_id, name),
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             )
@@ -131,12 +142,74 @@ class AdminManager:
                 duration_ms INTEGER DEFAULT 0,
                 parameters TEXT DEFAULT '',
                 comments TEXT DEFAULT '',
+                engine_type TEXT DEFAULT 'spatialite',
+                is_scenario INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (provenance_id) REFERENCES provenance(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_task_id) REFERENCES task_details(id) ON DELETE SET NULL
             )
         """)
 
+        # Spatial references — overlay layer info per assessment (EMDS 8 adaptation)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS spatial_references (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT UNIQUE NOT NULL,
+                assessment_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                overlay_layer_name TEXT DEFAULT '',
+                source_tables TEXT DEFAULT '',
+                source_db_type TEXT DEFAULT 'spatialite',
+                source_db_path TEXT DEFAULT '',
+                srid INTEGER DEFAULT 4326,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
+            )
+        """)
+
+        # App settings — single-row config table (EMDS 8 adaptation)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                plugin_version TEXT DEFAULT '',
+                default_project_dir TEXT DEFAULT '',
+                default_base_layers_group TEXT DEFAULT 'Base Layers',
+                output_group_name TEXT DEFAULT 'Output Layers',
+                symbology_defaults TEXT DEFAULT '',
+                misc TEXT DEFAULT ''
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO app_settings (id) VALUES (1)")
+
+        self.connection.commit()
+        cursor.close()
+
+    def _migrate_schema(self):
+        """Apply incremental schema migrations for existing databases (idempotent).
+
+        Each ALTER TABLE is wrapped in try/except so it is safe to call on
+        both new and previously-existing databases.
+        """
+        migrations = [
+            # (table, column, definition)
+            ("projects",      "is_deleted",           "INTEGER DEFAULT 0"),
+            ("projects",      "base_layer_names",     "TEXT DEFAULT ''"),
+            ("projects",      "db_type",              "TEXT DEFAULT 'spatialite'"),
+            ("projects",      "qgs_project_file",     "TEXT DEFAULT ''"),
+            ("projects",      "db_connection_string", "TEXT DEFAULT ''"),
+            ("projects",      "workspace_paths",      "TEXT DEFAULT ''"),
+            ("assessments",   "is_deleted",           "INTEGER DEFAULT 0"),
+            ("task_details",  "engine_type",          "TEXT DEFAULT 'spatialite'"),
+            ("task_details",  "is_scenario",          "INTEGER DEFAULT 0"),
+        ]
+        cursor = self.connection.cursor()
+        for table, column, definition in migrations:
+            try:
+                cursor.execute(
+                    f'ALTER TABLE {table} ADD COLUMN {column} {definition}'
+                )
+            except Exception:
+                pass  # column already exists — skip silently
         self.connection.commit()
         cursor.close()
 
@@ -172,70 +245,106 @@ class AdminManager:
         return project_id
 
     def get_all_projects(self):
-        """Return list of dicts with all projects."""
+        """Return list of dicts with all non-deleted projects."""
         cursor = self.connection.cursor()
         cursor.execute(
-            "SELECT id, uuid, name, description, db_path, created_at FROM projects ORDER BY name"
+            """SELECT id, uuid, name, description, db_path, created_at,
+                      is_deleted, base_layer_names, db_type, qgs_project_file
+               FROM projects WHERE is_deleted = 0 ORDER BY name"""
         )
         rows = cursor.fetchall()
         cursor.close()
-        return [
-            {
-                'id': r[0], 'uuid': r[1], 'name': r[2],
-                'description': r[3], 'db_path': r[4], 'created_at': r[5]
-            }
-            for r in rows
-        ]
+        return [self._row_to_project(r) for r in rows]
 
     def get_project(self, project_id):
         """Return single project dict or None."""
         cursor = self.connection.cursor()
         cursor.execute(
-            "SELECT id, uuid, name, description, db_path, created_at FROM projects WHERE id = ?",
+            """SELECT id, uuid, name, description, db_path, created_at,
+                      is_deleted, base_layer_names, db_type, qgs_project_file
+               FROM projects WHERE id = ?""",
             (project_id,)
         )
         row = cursor.fetchone()
         cursor.close()
-        if row:
-            return {
-                'id': row[0], 'uuid': row[1], 'name': row[2],
-                'description': row[3], 'db_path': row[4], 'created_at': row[5]
-            }
-        return None
+        return self._row_to_project(row) if row else None
 
     def get_project_by_name(self, name):
         """Return single project dict or None."""
         cursor = self.connection.cursor()
         cursor.execute(
-            "SELECT id, uuid, name, description, db_path, created_at FROM projects WHERE name = ?",
+            """SELECT id, uuid, name, description, db_path, created_at,
+                      is_deleted, base_layer_names, db_type, qgs_project_file
+               FROM projects WHERE name = ?""",
             (name,)
         )
         row = cursor.fetchone()
         cursor.close()
-        if row:
-            return {
-                'id': row[0], 'uuid': row[1], 'name': row[2],
-                'description': row[3], 'db_path': row[4], 'created_at': row[5]
-            }
-        return None
+        return self._row_to_project(row) if row else None
+
+    def _row_to_project(self, r):
+        """Convert a projects DB row tuple to a dict."""
+        return {
+            'id': r[0], 'uuid': r[1], 'name': r[2],
+            'description': r[3], 'db_path': r[4], 'created_at': r[5],
+            'is_deleted': bool(r[6]) if len(r) > 6 else False,
+            'base_layer_names': r[7] if len(r) > 7 else '',
+            'db_type': r[8] if len(r) > 8 else 'spatialite',
+            'qgs_project_file': r[9] if len(r) > 9 else '',
+        }
 
     def delete_project(self, project_id):
-        """Delete project, cascade-delete its assessments, and remove project DB file."""
+        """Soft-delete a project and all its assessments (is_deleted = 1).
+
+        The project's SpatiaLite file is kept on disk to preserve data.
+        Use purge_project() to permanently remove the record and file.
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "UPDATE projects SET is_deleted = 1 WHERE id = ?", (project_id,)
+        )
+        cursor.execute(
+            "UPDATE assessments SET is_deleted = 1 WHERE project_id = ?", (project_id,)
+        )
+        self.connection.commit()
+        cursor.close()
+
+    def purge_project(self, project_id):
+        """Permanently delete a project record and its SpatiaLite file from disk."""
         project = self.get_project(project_id)
+        if not project:
+            # Check deleted projects too
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT id, db_path FROM projects WHERE id = ?", (project_id,)
+            )
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                project = {'id': row[0], 'db_path': row[1]}
 
         cursor = self.connection.cursor()
         cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         self.connection.commit()
         cursor.close()
 
-        # Remove project DB file from disk
-        if project and project['db_path']:
+        if project and project.get('db_path'):
             abs_path = os.path.join(self.plugin_dir, project['db_path'])
             if os.path.exists(abs_path):
                 try:
                     os.remove(abs_path)
                 except OSError as e:
                     print(f"Warning: Could not delete project DB {abs_path}: {e}")
+
+    def update_project_base_layers(self, project_id, layer_names):
+        """Persist base layer names (list of str) to projects.base_layer_names as JSON."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "UPDATE projects SET base_layer_names = ? WHERE id = ?",
+            (json.dumps(layer_names), project_id)
+        )
+        self.connection.commit()
+        cursor.close()
 
     # ------------------------------------------------------------------ #
     #  Assessments CRUD
@@ -275,12 +384,14 @@ class AdminManager:
         return assessment_id
 
     def get_assessments_for_project(self, project_id):
-        """Return list of assessment dicts for a given project."""
+        """Return list of assessment dicts for a given project (non-deleted only)."""
         cursor = self.connection.cursor()
         cursor.execute(
             """SELECT id, uuid, project_id, name, description,
                       target_layer, spatial_extent, created_at
-               FROM assessments WHERE project_id = ? ORDER BY name""",
+               FROM assessments
+               WHERE project_id = ? AND is_deleted = 0
+               ORDER BY name""",
             (project_id,)
         )
         rows = cursor.fetchall()
@@ -312,7 +423,16 @@ class AdminManager:
         return exists
 
     def delete_assessment(self, assessment_id):
-        """Delete a single assessment by id (cascades to layers, visibility, steps)."""
+        """Soft-delete a single assessment (is_deleted = 1)."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "UPDATE assessments SET is_deleted = 1 WHERE id = ?", (assessment_id,)
+        )
+        self.connection.commit()
+        cursor.close()
+
+    def purge_assessment(self, assessment_id):
+        """Permanently delete an assessment record (cascades to layers, visibility, steps)."""
         cursor = self.connection.cursor()
         cursor.execute("DELETE FROM assessments WHERE id = ?", (assessment_id,))
         self.connection.commit()
@@ -485,8 +605,8 @@ class AdminManager:
 
     def add_task(self, provenance_id, step_order, operation,
                  parent_task_id=None, input_tables=None, output_tables=None,
-                 category="", duration_ms=0, parameters="", comments="",
-                 added_to_map=True):
+                 category="", engine_type="spatialite", duration_ms=0,
+                 parameters="", comments="", added_to_map=True, is_scenario=False):
         """Insert a task_details record. Returns the new task id.
 
         Args:
@@ -497,10 +617,12 @@ class AdminManager:
             input_tables: list of str  (serialized to JSON)
             output_tables: list of str (serialized to JSON)
             category: str
+            engine_type: str  e.g. 'spatialite', 'netweaver', 'cdp', 'lpa'
             duration_ms: int
             parameters: str (JSON or free text)
             comments: str
             added_to_map: bool
+            is_scenario: bool  True for what-if / alternate-scenario runs
         """
         task_uuid = str(uuid.uuid4())
         input_json = json.dumps(input_tables) if input_tables is not None else ''
@@ -511,11 +633,12 @@ class AdminManager:
             """INSERT INTO task_details
                (uuid, provenance_id, parent_task_id, step_order, operation,
                 category, input_tables, output_tables, added_to_map,
-                duration_ms, parameters, comments)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                duration_ms, parameters, comments, engine_type, is_scenario)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task_uuid, provenance_id, parent_task_id, step_order, operation,
              category, input_json, output_json, 1 if added_to_map else 0,
-             duration_ms, parameters, comments)
+             duration_ms, parameters, comments,
+             engine_type, 1 if is_scenario else 0)
         )
         self.connection.commit()
         task_id = cursor.lastrowid
@@ -528,7 +651,8 @@ class AdminManager:
         cursor.execute(
             """SELECT id, uuid, provenance_id, parent_task_id, step_order, operation,
                       category, input_tables, output_tables, db_type, added_to_map,
-                      scenario, duration_ms, parameters, comments, created_at
+                      scenario, duration_ms, parameters, comments, created_at,
+                      engine_type, is_scenario
                FROM task_details WHERE provenance_id = ? ORDER BY step_order""",
             (provenance_id,)
         )
@@ -542,7 +666,8 @@ class AdminManager:
         cursor.execute(
             """SELECT id, uuid, provenance_id, parent_task_id, step_order, operation,
                       category, input_tables, output_tables, db_type, added_to_map,
-                      scenario, duration_ms, parameters, comments, created_at
+                      scenario, duration_ms, parameters, comments, created_at,
+                      engine_type, is_scenario
                FROM task_details WHERE parent_task_id = ? ORDER BY step_order""",
             (parent_task_id,)
         )
@@ -586,8 +711,98 @@ class AdminManager:
             'category': r[6], 'input_tables': r[7], 'output_tables': r[8],
             'db_type': r[9], 'added_to_map': bool(r[10]),
             'scenario': r[11], 'duration_ms': r[12],
-            'parameters': r[13], 'comments': r[14], 'created_at': r[15]
+            'parameters': r[13], 'comments': r[14], 'created_at': r[15],
+            'engine_type': r[16] if len(r) > 16 else 'spatialite',
+            'is_scenario': bool(r[17]) if len(r) > 17 else False,
         }
+
+    # ------------------------------------------------------------------ #
+    #  Spatial References CRUD  (EMDS 8 adaptation)
+    # ------------------------------------------------------------------ #
+
+    def create_spatial_reference(self, assessment_id, name,
+                                  overlay_layer_name="", source_tables=None,
+                                  source_db_type="spatialite", source_db_path="",
+                                  srid=4326):
+        """Insert a spatial_references record. Returns the new id.
+
+        Args:
+            assessment_id: int
+            name: str — e.g. "{project}__Overlay"
+            overlay_layer_name: str — SpatiaLite table used as overlay
+            source_tables: list[str] — original input table names
+            source_db_type: str — 'spatialite', 'postgresql', 'geodatabase'
+            source_db_path: str — path or connection string
+            srid: int — EPSG code
+        """
+        sr_uuid = str(uuid.uuid4())
+        source_json = json.dumps(source_tables) if source_tables is not None else ''
+
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """INSERT INTO spatial_references
+               (uuid, assessment_id, name, overlay_layer_name,
+                source_tables, source_db_type, source_db_path, srid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sr_uuid, assessment_id, name, overlay_layer_name,
+             source_json, source_db_type, source_db_path, srid)
+        )
+        self.connection.commit()
+        sr_id = cursor.lastrowid
+        cursor.close()
+        return sr_id
+
+    def get_spatial_references_for_assessment(self, assessment_id):
+        """Return list of spatial_reference dicts for an assessment."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """SELECT id, uuid, assessment_id, name, overlay_layer_name,
+                      source_tables, source_db_type, source_db_path, srid, created_at
+               FROM spatial_references WHERE assessment_id = ? ORDER BY created_at""",
+            (assessment_id,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            {
+                'id': r[0], 'uuid': r[1], 'assessment_id': r[2],
+                'name': r[3], 'overlay_layer_name': r[4],
+                'source_tables': r[5], 'source_db_type': r[6],
+                'source_db_path': r[7], 'srid': r[8], 'created_at': r[9]
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------ #
+    #  App Settings  (EMDS 8 adaptation)
+    # ------------------------------------------------------------------ #
+
+    def get_app_setting(self, key, default=None):
+        """Return a value from the app_settings row (column = key).
+
+        Valid keys: plugin_version, default_project_dir, default_base_layers_group,
+                    output_group_name, symbology_defaults, misc
+        """
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(f'SELECT "{key}" FROM app_settings WHERE id = 1')
+            row = cursor.fetchone()
+            return row[0] if row else default
+        except Exception:
+            return default
+        finally:
+            cursor.close()
+
+    def set_app_setting(self, key, value):
+        """Update a single column in the app_settings row."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                f'UPDATE app_settings SET "{key}" = ? WHERE id = 1', (value,)
+            )
+            self.connection.commit()
+        finally:
+            cursor.close()
 
     # ------------------------------------------------------------------ #
     #  Utilities
