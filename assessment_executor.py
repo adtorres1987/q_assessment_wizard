@@ -1,231 +1,208 @@
 # -*- coding: utf-8 -*-
 """
-Assessment Executor Module
-Executes assessment workflows: memory-only or spatial analysis via SpatiaLite.
+AssessmentExecutor — thin UI facade over the Application Layer use cases.
+
+Phase 4 (Clean Architecture): this class is no longer an orchestrator.
+All business logic lives in core/application/use_cases/.
+
+Responsibilities:
+  - Build Command dataclasses from raw QGIS inputs.
+  - Call the appropriate use case.
+  - Catch ValueError / RuntimeError and show QMessageBox to the user.
+  - Return wizard_results dicts upward to the dialog.
+
+UI layer → AssessmentExecutor (this file)
+              ↓ Command dataclasses
+           Use Cases (core/application/use_cases/)
+              ↓ SpatialEngine / AdminManager
+           Infrastructure
 """
 
-from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
-from qgis.PyQt.QtCore import Qt, QCoreApplication
-from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
+from qgis.PyQt.QtWidgets import QMessageBox
 
-from .project_manager import ProjectManager
-from .spatial_analysis_spatialite import SpatialAnalyzerLite, OperationType
+from .core.application import (
+    CreateScenarioCommand, CreateScenario,
+    ApplyOverlayCommand,   ApplyOverlay,
+    RollbackVersionCommand, RollbackVersion,
+    CompareVersionsCommand, CompareVersions,
+)
 
 
 class AssessmentExecutor:
-    """Executes assessment workflows: memory-only or spatial analysis."""
+    """Thin facade: translates UI events into use-case commands."""
 
-    #  Group name for created layers in the layer tree
-    OUTPUT_GROUP_NAME = "Output Layers" 
+    OUTPUT_GROUP_NAME = "Output Layers"
 
     def __init__(self, project_id, admin_manager, project_db_id):
         """
         Args:
-            project_id: str - project name/prefix for naming output layers
-            admin_manager: AdminManager instance
-            project_db_id: int - project database ID
+            project_id:     str — project name prefix for output layer naming
+            admin_manager:  AdminManager instance
+            project_db_id:  int — project database ID in admin.sqlite
         """
-        self.project_id = project_id
+        self.project_id    = project_id
         self.admin_manager = admin_manager
         self.project_db_id = project_db_id
 
-    def _get_or_create_output_group(self):
-        """Get or create the output layers group in the layer tree.
-
-        Returns:
-            QgsLayerTreeGroup
-        """
-        root = QgsProject.instance().layerTreeRoot()
-        group = root.findGroup(self.OUTPUT_GROUP_NAME)
-        if not group:
-            group = root.addGroup(self.OUTPUT_GROUP_NAME)
-        return group
+    # ------------------------------------------------------------------ #
+    #  Validation helper (used by the dialog before execution)
+    # ------------------------------------------------------------------ #
 
     def validate_assessment_name(self, assessment_name):
-        """Check if assessment name already exists.
-
-        Returns:
-            bool: True if name is available, False if duplicate
-        """
+        """Return True if the name is available (not a duplicate)."""
         if self.admin_manager and self.project_db_id is not None:
             return not self.admin_manager.assessment_name_exists(
                 self.project_db_id, assessment_name
             )
         return True
 
+    # ------------------------------------------------------------------ #
+    #  Case 1: simple (memory) assessment
+    # ------------------------------------------------------------------ #
+
     def execute_simple_assessment(self, assessment_name, target_layer,
                                    description, parent_widget=None):
-        """Case 1: Only target layer -- create memory layer from selected features.
+        """Create a memory layer from selected features (no spatial analysis).
 
-        Args:
-            assessment_name: str
-            target_layer: QgsVectorLayer with features selected
-            description: str
-            parent_widget: QWidget for dialog parenting
+        Delegates to: CreateScenario use case.
 
         Returns:
-            dict or None: wizard_results dict, or None on failure
+            dict or None: wizard_results, or None on failure.
         """
-        selected_features = list(target_layer.selectedFeatures())
-
-        if not selected_features:
-            QMessageBox.warning(
-                parent_widget,
-                "No Features Selected",
-                "No features are selected in the target layer. "
-                "Please select features in Page 2."
-            )
+        cmd = CreateScenarioCommand(
+            assessment_name=assessment_name,
+            description=description,
+            project_id=self.project_id,
+            project_db_id=self.project_db_id,
+            target_layer=target_layer,
+        )
+        try:
+            result = CreateScenario(self.admin_manager).execute(cmd)
+        except ValueError as e:
+            QMessageBox.warning(parent_widget, "Cannot Create Assessment", str(e))
             return None
 
-        # Create memory layer with selected features
-        geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
-        crs = target_layer.crs().authid()
-        layer_name = f"{self.project_id}__{assessment_name}"
-
-        memory_layer = QgsVectorLayer(
-            f"{geom_type}?crs={crs}",
-            layer_name,
-            "memory"
-        )
-
-        memory_layer.dataProvider().addAttributes(target_layer.fields().toList())
-        memory_layer.updateFields()
-        memory_layer.dataProvider().addFeatures(selected_features)
-        memory_layer.updateExtents()
-
-        group = self._get_or_create_output_group()
-        QgsProject.instance().addMapLayer(memory_layer, False)
-        group.addLayer(memory_layer)
-
+        layer_name = result['output_tables'][0] if result['output_tables'] else assessment_name
         QMessageBox.information(
             parent_widget,
             "Layer Created",
             f"Layer '{layer_name}' created successfully!\n\n"
-            f"Features: {len(selected_features)}"
+            f"Features: {len(list(target_layer.selectedFeatures()))}"
         )
+        return result
 
-        return {
-            'assessment_name': assessment_name,
-            'target_layer': target_layer.name(),
-            'assessment_layers': [],
-            'output_tables': [layer_name],
-            'description': description
-        }
+    # ------------------------------------------------------------------ #
+    #  Case 2: spatial assessment (with overlay analysis)
+    # ------------------------------------------------------------------ #
 
     def execute_spatial_assessment(self, assessment_name, target_layer,
-                                     assessment_layers, description,
-                                     parent_widget=None):
-        """Case 2: Target + assessment layers -- spatial analysis via SpatiaLite.
+                                    assessment_layers, description,
+                                    parent_widget=None):
+        """Run spatial overlay analysis and produce SpatiaLite base tables.
 
-        Produces ONE final base table per assessment layer pair. Intersection and
-        union are computed as temporary tables; the union is renamed as the final
-        base table and the intersection temporary is dropped.
-
-        Args:
-            assessment_name: str
-            target_layer: QgsVectorLayer
-            assessment_layers: list[QgsVectorLayer]
-            description: str
-            parent_widget: QWidget for dialog parenting
+        Delegates to: ApplyOverlay use case.
 
         Returns:
-            dict or None: wizard_results dict, or None on failure
+            dict or None: wizard_results, or None on failure.
         """
-        project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
-        if not project_db_path:
-            raise Exception("Project database path not found.")
+        cmd = ApplyOverlayCommand(
+            assessment_name=assessment_name,
+            description=description,
+            project_id=self.project_id,
+            project_db_id=self.project_db_id,
+            target_layer=target_layer,
+            assessment_layers=assessment_layers,
+        )
+        try:
+            result = ApplyOverlay(self.admin_manager).execute(cmd)
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.critical(parent_widget, "Assessment Failed", str(e))
+            return None
 
-        pm = ProjectManager(project_db_path)
-        pm.connect()
+        layer_names = "\n• ".join(result['output_tables'])
+        QMessageBox.information(
+            parent_widget,
+            "Assessment Complete",
+            f"Assessment created successfully!\n\n"
+            f"Base layer(s):\n• {layer_names}"
+        )
+        return result
 
-        # Migrate target and assessment layers if not already in SpatiaLite
-        target_table = pm.sanitize_table_name(target_layer.name())
-        if not pm.table_exists(target_table):
-            pm.migrate_layer(target_layer, target_table)
+    # ------------------------------------------------------------------ #
+    #  Case 3: rollback to a previous version
+    # ------------------------------------------------------------------ #
 
-        for al in assessment_layers:
-            at = pm.sanitize_table_name(al.name())
-            if not pm.table_exists(at):
-                pm.migrate_layer(al, at)
+    def rollback_to_version(self, scenario_name, version_id,
+                            parent_widget=None):
+        """Restore HEAD to a previous version — O(1).
 
-        analyzer = SpatialAnalyzerLite(pm)
-        output_entries = []  # list of {'table': str, 'layer': QgsVectorLayer}
+        Delegates to: RollbackVersion use case.
 
-        for assessment_layer in assessment_layers:
-            assessment_table = pm.sanitize_table_name(assessment_layer.name())
+        Returns:
+            dict or None: { table, version_id, layer }, or None on failure.
+        """
+        cmd = RollbackVersionCommand(
+            scenario_name=scenario_name,
+            version_id=version_id,
+            project_db_id=self.project_db_id,
+        )
+        try:
+            result = RollbackVersion(self.admin_manager).execute(cmd)
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.critical(parent_widget, "Rollback Failed", str(e))
+            return None
 
-            # Base name for the final output table
-            if len(assessment_layers) == 1:
-                base_name = f"{self.project_id}__{assessment_name}"
-            else:
-                safe = assessment_layer.name().replace(' ', '_')
-                base_name = f"{self.project_id}__{assessment_name}_{safe}"
+        QMessageBox.information(
+            parent_widget,
+            "Rollback Complete",
+            f"Restored to version {version_id}.\n"
+            f"Table: {result['table']}"
+        )
+        return result
 
-            tmp_intersect = pm.sanitize_table_name(f"{base_name}_tmp_intersect")
-            tmp_union     = pm.sanitize_table_name(f"{base_name}_tmp_union")
-            final_table   = pm.sanitize_table_name(base_name)
+    # ------------------------------------------------------------------ #
+    #  Case 4: compare two versions side-by-side
+    # ------------------------------------------------------------------ #
 
-            # Drop final table if it already exists (re-run scenario)
-            if pm.table_exists(final_table):
-                pm.drop_table(final_table)
+    def compare_versions(self, scenario_name, version_id_a, version_id_b,
+                         parent_widget=None):
+        """Load two version snapshots as QGIS layers for visual comparison.
 
-            # Step 1: Intersection → temporary SpatiaLite table only
-            analyzer.analyze_and_create_layer(
-                target_table, assessment_table, tmp_intersect,
-                operation_type=OperationType.INTERSECT,
-                add_to_qgis=False
-            )
+        Delegates to: CompareVersions use case.
 
-            # Step 2: Union → temporary SpatiaLite table only
-            analyzer.analyze_and_create_layer(
-                target_table, assessment_table, tmp_union,
-                operation_type=OperationType.UNION,
-                add_to_qgis=False
-            )
+        Returns:
+            dict or None: { layer_a, layer_b, version_id_a, version_id_b },
+                          or None on failure.
+        """
+        cmd = CompareVersionsCommand(
+            scenario_name=scenario_name,
+            version_id_a=version_id_a,
+            version_id_b=version_id_b,
+            project_db_id=self.project_db_id,
+        )
+        try:
+            result = CompareVersions(self.admin_manager).execute(cmd)
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.critical(parent_widget, "Compare Failed", str(e))
+            return None
 
-            # Step 3: Promote union table as the final base table
-            pm.rename_table(tmp_union, final_table)
+        return result
 
-            # Step 4: Drop intersection temporary
-            pm.drop_table(tmp_intersect)
-
-            # Step 5: Load the final table as a single QGIS layer
-            layer = analyzer._create_qgis_layer(
-                final_table, base_name, group_name=self.OUTPUT_GROUP_NAME
-            )
-            output_entries.append({'table': final_table, 'layer': layer})
-
-        pm.disconnect()
-
-        if output_entries:
-            layer_names = "\n• ".join(e['layer'].name() for e in output_entries)
-            QMessageBox.information(
-                parent_widget,
-                "Assessment Complete",
-                f"Assessment created successfully!\n\n"
-                f"Base layer(s):\n• {layer_names}"
-            )
-
-        return {
-            'assessment_name': assessment_name,
-            'target_layer': target_layer.name(),
-            'assessment_layers': [l.name() for l in assessment_layers],
-            'output_tables': [e['table'] for e in output_entries],
-            'description': description
-        }
+    # ------------------------------------------------------------------ #
+    #  Metadata recording (delegates to AdminManager directly)
+    # ------------------------------------------------------------------ #
 
     def record_assessment(self, wizard_results):
-        """Record assessment in the admin metadata database.
+        """Persist assessment metadata to admin.sqlite.
 
-        Creates the assessment, sets initial layer visibility, and — for
-        spatial assessments — adds a provenance + task_details record so the
-        TreeView can show the full EMDS 3 hierarchy.
+        Creates the assessment record, sets initial layer visibility, and —
+        for spatial assessments — records provenance + task_details.
 
         Args:
             wizard_results: dict with assessment_name, target_layer, etc.
 
         Returns:
-            int or None: the new assessment_id, or None on failure / no admin_manager
+            int or None: new assessment_id, or None on failure.
         """
         if not (self.admin_manager and self.project_db_id is not None):
             return None
@@ -240,11 +217,9 @@ class AssessmentExecutor:
                 output_tables=wizard_results.get('output_tables', [])
             )
 
-            # Persist default visibility (visible=1) for each output table
             for table_name in wizard_results.get('output_tables', []):
                 self.admin_manager.set_layer_visibility(assessment_id, table_name, True)
 
-            # For spatial assessments record provenance + initial task
             if wizard_results.get('assessment_layers'):
                 self._record_provenance(
                     assessment_id=assessment_id,
@@ -261,14 +236,7 @@ class AssessmentExecutor:
 
     def _record_provenance(self, assessment_id, output_tables,
                            target_layer_name, assessment_layer_names):
-        """Create a provenance + task_details entry for a completed spatial analysis.
-
-        Args:
-            assessment_id: int
-            output_tables: list[str] — final output table name(s)
-            target_layer_name: str
-            assessment_layer_names: list[str]
-        """
+        """Create provenance + task_details entries in admin.sqlite."""
         if not self.admin_manager:
             return
         try:
