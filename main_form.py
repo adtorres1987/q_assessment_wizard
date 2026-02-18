@@ -699,6 +699,9 @@ class AssessmentMainForm(QDialog):
                 act = menu.addAction("Delete Project")
                 act.triggered.connect(lambda: self._on_delete_project(item))
             elif node_type == 'assessment':
+                act = menu.addAction("New Version")
+                act.triggered.connect(lambda: self._on_new_version(item))
+                menu.addSeparator()
                 act = menu.addAction("Delete Assessment")
                 act.triggered.connect(lambda: self._on_delete_assessment(item))
             elif node_type == 'provenance':
@@ -771,6 +774,44 @@ class AssessmentMainForm(QDialog):
         current_state = item.checkState(0)
         new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
         item.setCheckState(0, new_state)
+
+    def _on_new_version(self, item):
+        """Re-run spatial overlay for this assessment, creating a new version."""
+        assessment_id = item.data(0, ROLE_ID)
+        project_id = self.selected_path.get('project_id')
+        if not project_id:
+            return
+
+        assessment_name = item.text(0)
+
+        # Check if the assessment has input layers (spatial assessment)
+        input_layers = self.admin_manager.get_assessment_layers(
+            assessment_id, layer_type='input'
+        )
+        if not input_layers:
+            QMessageBox.warning(
+                self, "Not Supported",
+                f"Assessment '{assessment_name}' is a simple (memory) assessment.\n"
+                "Only spatial assessments support versioning."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self, "New Version",
+            f"Create a new version of assessment '{assessment_name}'?\n\n"
+            "This will re-run the spatial overlay with the same layers.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        project_name = self._get_project_name(project_id)
+        from .assessment_executor import AssessmentExecutor
+        executor = AssessmentExecutor(project_name, self.admin_manager, project_id)
+        result = executor.rerun_spatial_assessment(assessment_id, parent_widget=self)
+
+        if result:
+            self._populate_tree()
 
     def on_create_assessment(self):
         """Launch the assessment wizard dialog and display results."""

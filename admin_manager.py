@@ -411,6 +411,27 @@ class AdminManager:
             })
         return assessments
 
+    def get_assessment(self, assessment_id):
+        """Return a single assessment dict by ID, or None."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """SELECT id, uuid, project_id, name, description,
+                      target_layer, spatial_extent, created_at
+               FROM assessments
+               WHERE id = ? AND is_deleted = 0""",
+            (assessment_id,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        return {
+            'id': row[0], 'uuid': row[1], 'project_id': row[2],
+            'name': row[3], 'description': row[4],
+            'target_layer': row[5], 'spatial_extent': row[6],
+            'created_at': row[7],
+        }
+
     def assessment_name_exists(self, project_id, assessment_name):
         """Return True if an assessment with this name exists under this project."""
         cursor = self.connection.cursor()

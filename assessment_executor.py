@@ -129,6 +129,99 @@ class AssessmentExecutor:
         return result
 
     # ------------------------------------------------------------------ #
+    #  Case 2b: re-run spatial assessment (new version)
+    # ------------------------------------------------------------------ #
+
+    def rerun_spatial_assessment(self, assessment_id, parent_widget=None):
+        """Re-run overlay for an existing assessment, creating version n+1.
+
+        Uses the stored target_layer and assessment_layers from admin.sqlite
+        to re-execute the overlay on SpatiaLite tables that already exist.
+
+        Returns:
+            dict or None: { output_tables, version_ids, assessment_name }
+                          or None on failure.
+        """
+        assessment = self.admin_manager.get_assessment(assessment_id)
+        if not assessment:
+            QMessageBox.warning(parent_widget, "Error",
+                                "Assessment not found in metadata.")
+            return None
+
+        input_layers = self.admin_manager.get_assessment_layers(
+            assessment_id, layer_type='input'
+        )
+        if not input_layers:
+            QMessageBox.warning(parent_widget, "Not Supported",
+                                "Only spatial assessments (with assessment layers) "
+                                "support versioning.")
+            return None
+
+        project_db_path = self.admin_manager.get_project_db_path(self.project_db_id)
+        if not project_db_path:
+            QMessageBox.critical(parent_widget, "Error",
+                                 "Project database path not found.")
+            return None
+
+        target_layer_name = assessment['target_layer']
+        assessment_name = assessment['name']
+        output_tables = []
+        version_ids = []
+
+        try:
+            from .core.spatial_engine import SpatialEngine
+            with SpatialEngine(project_db_path) as engine:
+                target_table = engine._repo.sanitize_name(target_layer_name)
+
+                for al in input_layers:
+                    assessment_table = engine._repo.sanitize_name(al['layer_name'])
+                    if len(input_layers) == 1:
+                        base_name = f"{self.project_id}__{assessment_name}"
+                    else:
+                        safe = al['layer_name'].replace(' ', '_')
+                        base_name = f"{self.project_id}__{assessment_name}_{safe}"
+
+                    result = engine.overlay(
+                        target_table, assessment_table, base_name,
+                        group_name="Output Layers",
+                    )
+                    output_tables.append(result['table'])
+                    version_ids.append(result['version_id'])
+
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.critical(parent_widget, "New Version Failed", str(e))
+            return None
+
+        # Record new output layers in admin.sqlite
+        for table_name in output_tables:
+            self.admin_manager.add_assessment_layer(
+                assessment_id, table_name, 'output'
+            )
+            self.admin_manager.set_layer_visibility(assessment_id, table_name, True)
+
+        # Record provenance
+        self._record_provenance(
+            assessment_id=assessment_id,
+            output_tables=output_tables,
+            target_layer_name=target_layer_name,
+            assessment_layer_names=[al['layer_name'] for al in input_layers]
+        )
+
+        layer_names = "\n• ".join(output_tables)
+        QMessageBox.information(
+            parent_widget,
+            "New Version Created",
+            f"New version created successfully!\n\n"
+            f"Table(s):\n• {layer_names}"
+        )
+
+        return {
+            'assessment_name': assessment_name,
+            'output_tables': output_tables,
+            'version_ids': version_ids,
+        }
+
+    # ------------------------------------------------------------------ #
     #  Case 3: rollback to a previous version
     # ------------------------------------------------------------------ #
 
