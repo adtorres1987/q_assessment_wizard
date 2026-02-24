@@ -31,8 +31,6 @@ class ApplyOverlay:
                        the project SpatiaLite database and validate names).
     """
 
-    OUTPUT_GROUP_NAME = "Output Layers"
-
     def __init__(self, admin_manager):
         if admin_manager is None:
             raise RuntimeError(
@@ -63,6 +61,11 @@ class ApplyOverlay:
                 f"Project database path not found for project_db_id={cmd.project_db_id}."
             )
 
+        # Build assessment group: "{seq:02d}_{assessment_name}"
+        # For reruns (v2+) the group already exists — new version goes in sub-group.
+        seq = self._admin_manager.get_assessment_count(cmd.project_db_id)
+        assessment_group = f"{seq:02d}_{cmd.assessment_name}"
+
         scenario = self._build_scenario(cmd)
         qgs_layer_map = self._build_layer_map(cmd)
 
@@ -70,11 +73,20 @@ class ApplyOverlay:
         version_ids   = []
 
         from ...spatial_engine import SpatialEngine
+        from ....spatial_analysis_spatialite import SpatialAnalyzerLite
+
         with SpatialEngine(project_db_path) as engine:
-            # Migrate all layers → populate table_name in domain objects
+            analyzer = SpatialAnalyzerLite(engine._repo.project_manager)
+
+            # Migrate all layers → populate table_name + add INPUT_ copies to group
             for layer_ref in scenario['all_layers']:
                 qgs_layer = qgs_layer_map[layer_ref['name']]
                 layer_ref['table_name'] = engine.prepare_layer(qgs_layer)
+                analyzer.add_layer_to_group(
+                    qgs_layer,
+                    group_path=assessment_group,
+                    display_name=f"INPUT_{layer_ref['name']}",
+                )
 
             # Run versioned overlay per assessment layer
             for a_ref in scenario['assessment_layers']:
@@ -82,11 +94,24 @@ class ApplyOverlay:
                     cmd.project_id, cmd.assessment_name,
                     a_ref['name'], len(scenario['assessment_layers'])
                 )
+                # v2+ goes into a sub-group; v1 goes directly in the assessment group
+                existing = engine._repo.get_versions(
+                    engine._repo.sanitize_name(base_name)
+                )
+                if existing:
+                    next_v = len(existing) + 1
+                    group_name = f"{assessment_group}/v{next_v}_{cmd.assessment_name}"
+                    display_name = f"Result_v{next_v}"
+                else:
+                    group_name = assessment_group
+                    display_name = f"OUTPUT_{cmd.assessment_name}"
+
                 result = engine.overlay(
                     scenario['target_layer']['table_name'],
                     a_ref['table_name'],
                     base_name,
-                    group_name=self.OUTPUT_GROUP_NAME,
+                    group_name=group_name,
+                    layer_display_name=display_name,
                 )
                 output_tables.append(result['table'])
                 version_ids.append(result['version_id'])
@@ -109,7 +134,7 @@ class ApplyOverlay:
             raise ValueError(
                 "ApplyOverlay requires at least one assessment layer."
             )
-        if self._admin_manager.assessment_name_exists(
+        if not cmd.allow_rerun and self._admin_manager.assessment_name_exists(
                 cmd.project_db_id, cmd.assessment_name):
             raise ValueError(
                 f"Assessment name '{cmd.assessment_name}' already exists "

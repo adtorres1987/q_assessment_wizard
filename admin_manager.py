@@ -411,6 +411,19 @@ class AdminManager:
             })
         return assessments
 
+    def get_assessment_count(self, project_id):
+        """Return total assessments ever created for a project (for sequential group numbering).
+
+        Includes soft-deleted records so group numbers are never reused.
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM assessments WHERE project_id = ?", (project_id,)
+        )
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
+
     def get_assessment(self, assessment_id):
         """Return a single assessment dict by ID, or None."""
         cursor = self.connection.cursor()
@@ -442,6 +455,16 @@ class AdminManager:
         exists = cursor.fetchone() is not None
         cursor.close()
         return exists
+
+    def rename_assessment(self, assessment_id, new_name):
+        """Rename an assessment."""
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "UPDATE assessments SET name = ? WHERE id = ?",
+            (new_name, assessment_id)
+        )
+        self.connection.commit()
+        cursor.close()
 
     def delete_assessment(self, assessment_id):
         """Soft-delete a single assessment (is_deleted = 1)."""
@@ -613,13 +636,6 @@ class AdminManager:
             for r in rows
         ]
 
-    def delete_provenance(self, provenance_id):
-        """Delete a provenance record (cascades to task_details)."""
-        cursor = self.connection.cursor()
-        cursor.execute("DELETE FROM provenance WHERE id = ?", (provenance_id,))
-        self.connection.commit()
-        cursor.close()
-
     # ------------------------------------------------------------------ #
     #  Task Details CRUD
     # ------------------------------------------------------------------ #
@@ -736,63 +752,6 @@ class AdminManager:
             'engine_type': r[16] if len(r) > 16 else 'spatialite',
             'is_scenario': bool(r[17]) if len(r) > 17 else False,
         }
-
-    # ------------------------------------------------------------------ #
-    #  Spatial References CRUD  (EMDS 8 adaptation)
-    # ------------------------------------------------------------------ #
-
-    def create_spatial_reference(self, assessment_id, name,
-                                  overlay_layer_name="", source_tables=None,
-                                  source_db_type="spatialite", source_db_path="",
-                                  srid=4326):
-        """Insert a spatial_references record. Returns the new id.
-
-        Args:
-            assessment_id: int
-            name: str — e.g. "{project}__Overlay"
-            overlay_layer_name: str — SpatiaLite table used as overlay
-            source_tables: list[str] — original input table names
-            source_db_type: str — 'spatialite', 'postgresql', 'geodatabase'
-            source_db_path: str — path or connection string
-            srid: int — EPSG code
-        """
-        sr_uuid = str(uuid.uuid4())
-        source_json = json.dumps(source_tables) if source_tables is not None else ''
-
-        cursor = self.connection.cursor()
-        cursor.execute(
-            """INSERT INTO spatial_references
-               (uuid, assessment_id, name, overlay_layer_name,
-                source_tables, source_db_type, source_db_path, srid)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (sr_uuid, assessment_id, name, overlay_layer_name,
-             source_json, source_db_type, source_db_path, srid)
-        )
-        self.connection.commit()
-        sr_id = cursor.lastrowid
-        cursor.close()
-        return sr_id
-
-    def get_spatial_references_for_assessment(self, assessment_id):
-        """Return list of spatial_reference dicts for an assessment."""
-        cursor = self.connection.cursor()
-        cursor.execute(
-            """SELECT id, uuid, assessment_id, name, overlay_layer_name,
-                      source_tables, source_db_type, source_db_path, srid, created_at
-               FROM spatial_references WHERE assessment_id = ? ORDER BY created_at""",
-            (assessment_id,)
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        return [
-            {
-                'id': r[0], 'uuid': r[1], 'assessment_id': r[2],
-                'name': r[3], 'overlay_layer_name': r[4],
-                'source_tables': r[5], 'source_db_type': r[6],
-                'source_db_path': r[7], 'srid': r[8], 'created_at': r[9]
-            }
-            for r in rows
-        ]
 
     # ------------------------------------------------------------------ #
     #  App Settings  (EMDS 8 adaptation)

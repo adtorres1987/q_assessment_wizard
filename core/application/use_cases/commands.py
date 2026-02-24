@@ -55,6 +55,7 @@ class ApplyOverlayCommand:
     project_db_id: int
     target_layer: object        # QgsVectorLayer
     assessment_layers: List     # list[QgsVectorLayer]
+    allow_rerun: bool = False   # bypass name uniqueness check for v2+
 
 
 @dataclass

@@ -111,7 +111,7 @@ class SpatialEngine:
     # ------------------------------------------------------------------ #
 
     def overlay(self, target_table, assessment_table, output_name,
-                group_name=None):
+                group_name=None, layer_display_name=None):
         """Run the full overlay pipeline and create an immutable versioned table.
 
         Each call creates a NEW table `{output_name}__v{n}` — previous versions
@@ -128,11 +128,15 @@ class SpatialEngine:
           8. Load final table as a QGIS layer
 
         Args:
-            target_table:     str — sanitized source table name in SpatiaLite
-            assessment_table: str — sanitized overlay table name in SpatiaLite
-            output_name:      str — base name (e.g. "project__assessment")
-                                    Version suffix is appended automatically.
-            group_name:       str or None — QGIS layer tree group for the result
+            target_table:       str — sanitized source table name in SpatiaLite
+            assessment_table:   str — sanitized overlay table name in SpatiaLite
+            output_name:        str — base name (e.g. "project__assessment")
+                                      Version suffix is appended automatically.
+            group_name:         str or None — QGIS layer tree group path for the
+                                result. Supports nested paths via '/' separator
+                                (e.g. "01_School/v2_result").
+            layer_display_name: str or None — display name shown in QGIS layer
+                                panel. Defaults to output_name when None.
 
         Returns:
             dict: {
@@ -179,8 +183,9 @@ class SpatialEngine:
             parent_version_id=parent_id,
         )
 
-        # Step 6 — Load as QGIS layer (display name = base name, no version suffix)
-        layer = self._ops.create_qgis_layer(final_table, output_name, group_name)
+        # Step 6 — Load as QGIS layer
+        display_name = layer_display_name or output_name
+        layer = self._ops.create_qgis_layer(final_table, display_name, group_name)
 
         return {
             'table': final_table,

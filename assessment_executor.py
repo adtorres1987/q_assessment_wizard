@@ -31,8 +31,6 @@ from .core.application import (
 class AssessmentExecutor:
     """Thin facade: translates UI events into use-case commands."""
 
-    OUTPUT_GROUP_NAME = "Output Layers"
-
     def __init__(self, project_id, admin_manager, project_db_id):
         """
         Args:
@@ -97,10 +95,13 @@ class AssessmentExecutor:
 
     def execute_spatial_assessment(self, assessment_name, target_layer,
                                     assessment_layers, description,
-                                    parent_widget=None):
+                                    allow_rerun=False, parent_widget=None):
         """Run spatial overlay analysis and produce SpatiaLite base tables.
 
         Delegates to: ApplyOverlay use case.
+
+        Args:
+            allow_rerun: If True, bypass name uniqueness check (for v2+).
 
         Returns:
             dict or None: wizard_results, or None on failure.
@@ -112,6 +113,7 @@ class AssessmentExecutor:
             project_db_id=self.project_db_id,
             target_layer=target_layer,
             assessment_layers=assessment_layers,
+            allow_rerun=allow_rerun,
         )
         try:
             result = ApplyOverlay(self.admin_manager).execute(cmd)
@@ -168,6 +170,18 @@ class AssessmentExecutor:
         output_tables = []
         version_ids = []
 
+        # Resolve assessment group: "{seq:02d}_{assessment_name}"
+        # seq = position of this assessment among all project assessments
+        all_assessments = self.admin_manager.get_assessments_for_project(
+            self.project_db_id
+        )
+        seq = next(
+            (i + 1 for i, a in enumerate(all_assessments)
+             if a['id'] == assessment_id),
+            1
+        )
+        assessment_group = f"{seq:02d}_{assessment_name}"
+
         try:
             from .core.spatial_engine import SpatialEngine
             with SpatialEngine(project_db_path) as engine:
@@ -181,9 +195,18 @@ class AssessmentExecutor:
                         safe = al['layer_name'].replace(' ', '_')
                         base_name = f"{self.project_id}__{assessment_name}_{safe}"
 
+                    # New version → sub-group inside assessment group
+                    existing = engine._repo.get_versions(
+                        engine._repo.sanitize_name(base_name)
+                    )
+                    next_v = len(existing) + 1
+                    group_name = f"{assessment_group}/v{next_v}_{assessment_name}"
+                    display_name = f"Result_v{next_v}"
+
                     result = engine.overlay(
                         target_table, assessment_table, base_name,
-                        group_name="Output Layers",
+                        group_name=group_name,
+                        layer_display_name=display_name,
                     )
                     output_tables.append(result['table'])
                     version_ids.append(result['version_id'])
@@ -285,6 +308,48 @@ class AssessmentExecutor:
     #  Metadata recording (delegates to AdminManager directly)
     # ------------------------------------------------------------------ #
 
+    def record_new_version(self, existing_assessment_id, wizard_results):
+        """Record new output layers + provenance for an existing assessment (v2+).
+
+        Does NOT create a new assessment record — only adds output layers and
+        provenance under the existing assessment_id.
+
+        Args:
+            existing_assessment_id: Primary key of the existing assessment.
+            wizard_results:         dict with output_tables, assessment_layers, etc.
+        """
+        if not (self.admin_manager and existing_assessment_id):
+            return
+        try:
+            for table_name in wizard_results.get('output_tables', []):
+                self.admin_manager.add_assessment_layer(
+                    existing_assessment_id, table_name, 'output'
+                )
+                self.admin_manager.set_layer_visibility(
+                    existing_assessment_id, table_name, True
+                )
+
+            # Register INPUT_ display layers for the new version's inputs
+            target_name = wizard_results.get('target_layer', '')
+            if target_name:
+                self.admin_manager.add_assessment_layer(
+                    existing_assessment_id, f"INPUT_{target_name}", 'reference'
+                )
+            for al_name in wizard_results.get('assessment_layers', []):
+                self.admin_manager.add_assessment_layer(
+                    existing_assessment_id, f"INPUT_{al_name}", 'reference'
+                )
+
+            if wizard_results.get('assessment_layers'):
+                self._record_provenance(
+                    assessment_id=existing_assessment_id,
+                    output_tables=wizard_results.get('output_tables', []),
+                    target_layer_name=wizard_results.get('target_layer', ''),
+                    assessment_layer_names=wizard_results.get('assessment_layers', [])
+                )
+        except Exception as e:
+            print(f"Warning: Could not record new version metadata: {e}")
+
     def record_assessment(self, wizard_results):
         """Persist assessment metadata to admin.sqlite.
 
@@ -312,6 +377,17 @@ class AssessmentExecutor:
 
             for table_name in wizard_results.get('output_tables', []):
                 self.admin_manager.set_layer_visibility(assessment_id, table_name, True)
+
+            # Register INPUT_ display layers (copies shown in the QGIS assessment group)
+            target_name = wizard_results.get('target_layer', '')
+            if target_name:
+                self.admin_manager.add_assessment_layer(
+                    assessment_id, f"INPUT_{target_name}", 'reference'
+                )
+            for al_name in wizard_results.get('assessment_layers', []):
+                self.admin_manager.add_assessment_layer(
+                    assessment_id, f"INPUT_{al_name}", 'reference'
+                )
 
             if wizard_results.get('assessment_layers'):
                 self._record_provenance(

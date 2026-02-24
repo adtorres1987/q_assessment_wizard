@@ -71,6 +71,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.map_canvas = None
         self.map_canvas_page3 = None
         self.map_tool_select = None
+        self._creating_new_version = False
+        self._existing_assessment_id = None
 
         # Initialize wizard pages
         self.initialize_page_1()
@@ -158,15 +160,16 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.project_id, self.admin_manager, self.project_db_id
         )
 
-        # Validate name uniqueness
-        if not executor.validate_assessment_name(assessment_name):
-            QMessageBox.warning(
-                self,
-                "Duplicate Assessment",
-                f"An assessment named '{assessment_name}' already exists in this project.\n\n"
-                "Please go back and choose a different name."
-            )
-            return
+        # Validate name uniqueness — skip if creating a new version
+        if not self._creating_new_version:
+            if not executor.validate_assessment_name(assessment_name):
+                QMessageBox.warning(
+                    self,
+                    "Duplicate Assessment",
+                    f"An assessment named '{assessment_name}' already exists in this project.\n\n"
+                    "Please go back and choose a different name."
+                )
+                return
 
         # Gather layers from table widget
         target_layer, assessment_layers = self._collect_target_and_assessment_layers()
@@ -199,13 +202,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             else:
                 self.wizard_results = executor.execute_spatial_assessment(
                     assessment_name, target_layer, assessment_layers,
-                    description, parent_widget=self
+                    description, allow_rerun=self._creating_new_version,
+                    parent_widget=self
                 )
 
             progress.close()
 
             if self.wizard_results:
-                executor.record_assessment(self.wizard_results)
+                if self._creating_new_version and self._existing_assessment_id:
+                    executor.record_new_version(
+                        self._existing_assessment_id, self.wizard_results
+                    )
+                else:
+                    executor.record_assessment(self.wizard_results)
                 self.cleanup_wizard_data()
                 super(QassessmentWizardDialog, self).accept()
 
@@ -253,7 +262,53 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
     def initialize_page_1(self):
         """Initialize the first wizard page."""
         self.populate_layers()
+        self.lineEdit_name.editingFinished.connect(self._on_name_editing_finished)
         self.page_1.validatePage = self.validate_page_1
+
+    def _on_name_editing_finished(self):
+        """Check for duplicate assessment name as soon as the user leaves the name field.
+
+        If the name already exists, immediately ask whether to create a new version.
+        On confirmation, repopulate the layer table to include Output Layers (blue)
+        so the user can configure everything with full context before clicking Next.
+        """
+        if self._creating_new_version or not self.admin_manager:
+            return
+
+        assessment_name = self.lineEdit_name.text().strip().replace(' ', '_')
+        if not assessment_name:
+            return
+
+        executor = AssessmentExecutor(
+            self.project_id, self.admin_manager, self.project_db_id
+        )
+        if executor.validate_assessment_name(assessment_name):
+            return  # Name is available — nothing to do
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Assessment Already Exists",
+            f"An assessment named '{assessment_name}' already exists.\n\n"
+            "Do you want to create a new version (v2+)?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self._creating_new_version = True
+            assessments = self.admin_manager.get_assessments_for_project(
+                self.project_db_id
+            )
+            for a in assessments:
+                if a['name'] == assessment_name:
+                    self._existing_assessment_id = a['id']
+                    break
+            # Repopulate table from scratch so Output Layers appear immediately
+            self.populate_layers()
+            self._add_output_layers_to_table()
+        else:
+            # Clear the name field so the user picks a different one
+            self.lineEdit_name.clear()
+            self.lineEdit_name.setFocus()
 
     def populate_layers(self):
         """Populate the table widget with vector layers from the 'Base Layers' group folder."""
@@ -303,6 +358,48 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             ])
             status_combo.currentTextChanged.connect(self.on_status_changed)
             self.tableWidget_layers.setCellWidget(row_position, 2, status_combo)
+
+        self.tableWidget_layers.resizeColumnsToContents()
+
+    def _add_output_layers_to_table(self):
+        """Add Output Layers to the table widget with a blue background (v2+ mode only)."""
+        from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
+        from qgis.PyQt.QtGui import QColor
+
+        root = QgsProject.instance().layerTreeRoot()
+        output_group = root.findGroup("Output Layers")
+        if not output_group:
+            return
+
+        light_blue = QColor(173, 216, 230)
+
+        for tree_layer in output_group.findLayers():
+            layer = tree_layer.layer()
+            if not layer or not isinstance(layer, QgsVectorLayer):
+                continue
+
+            row = self.tableWidget_layers.rowCount()
+            self.tableWidget_layers.insertRow(row)
+
+            layer_item = QTableWidgetItem(layer.name())
+            layer_item.setBackground(light_blue)
+            self.tableWidget_layers.setItem(row, 0, layer_item)
+
+            geom_item = QTableWidgetItem(
+                QgsWkbTypes.displayString(layer.wkbType())
+            )
+            geom_item.setBackground(light_blue)
+            self.tableWidget_layers.setItem(row, 1, geom_item)
+
+            status_combo = QComboBox()
+            status_combo.addItems([
+                self.STATUS_DO_NOT_INCLUDE,
+                self.STATUS_INCLUDE,
+                self.STATUS_TARGET,
+                self.STATUS_SPATIAL_MARKER,
+            ])
+            status_combo.currentTextChanged.connect(self.on_status_changed)
+            self.tableWidget_layers.setCellWidget(row, 2, status_combo)
 
         self.tableWidget_layers.resizeColumnsToContents()
 

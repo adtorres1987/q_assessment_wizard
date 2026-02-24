@@ -145,17 +145,41 @@ class SpatialAnalyzerLite:
             cursor.close()
             raise Exception(f"Spatial analysis failed: {str(e)}")
 
-    def _create_qgis_layer(self, table_name, layer_name=None, group_name=None):
-        """
-        Create a QGIS vector layer from a SpatiaLite table.
+    def _find_or_create_group(self, parent, name):
+        """Find or create a single-level layer tree group under parent."""
+        group = parent.findGroup(name)
+        if not group:
+            group = parent.addGroup(name)
+        return group
+
+    def _resolve_group(self, group_path):
+        """Resolve a '/'-separated group path from the layer tree root.
+
+        Creates any missing groups along the path.
 
         Args:
-            table_name: Name of the SpatiaLite table
-            layer_name: Display name for the layer (defaults to table_name)
-            group_name: Optional group name to place the layer in
+            group_path: str — e.g. "01_SchoolFocus" or "01_SchoolFocus/v2_result"
 
         Returns:
-            QgsVectorLayer: The created layer
+            QgsLayerTreeGroup: the deepest group in the path.
+        """
+        root = QgsProject.instance().layerTreeRoot()
+        parent = root
+        for part in group_path.split('/'):
+            parent = self._find_or_create_group(parent, part)
+        return parent
+
+    def _create_qgis_layer(self, table_name, layer_name=None, group_name=None):
+        """Create a QGIS vector layer from a SpatiaLite table.
+
+        Args:
+            table_name: Name of the SpatiaLite table.
+            layer_name: Display name for the layer (defaults to table_name).
+            group_name: Optional group path. Supports nested paths via '/'
+                        e.g. "01_SchoolFocus" or "01_SchoolFocus/v2_result".
+
+        Returns:
+            QgsVectorLayer: The created and registered layer.
         """
         if not layer_name:
             layer_name = table_name
@@ -167,16 +191,37 @@ class SpatialAnalyzerLite:
             raise Exception(f"Failed to create QGIS layer from table '{table_name}'")
 
         if group_name:
-            root = QgsProject.instance().layerTreeRoot()
-            group = root.findGroup(group_name)
-            if not group:
-                group = root.addGroup(group_name)
+            group = self._resolve_group(group_name)
             QgsProject.instance().addMapLayer(layer, False)
             group.addLayer(layer)
         else:
             QgsProject.instance().addMapLayer(layer)
 
         return layer
+
+    def add_layer_to_group(self, qgs_layer, group_path, display_name=None):
+        """Add an existing QgsVectorLayer to a (possibly nested) group.
+
+        Creates a new QgsVectorLayer instance from the same data source so
+        the original layer (e.g. in 'Base Layers') is not moved.
+
+        Args:
+            qgs_layer:    Source QgsVectorLayer.
+            group_path:   '/'-separated group path (created if missing).
+            display_name: Display name for the new instance. If None, uses
+                          the original layer name.
+
+        Returns:
+            QgsVectorLayer: the newly added layer instance.
+        """
+        name = display_name or qgs_layer.name()
+        new_layer = QgsVectorLayer(qgs_layer.source(), name, qgs_layer.providerType())
+        if not new_layer.isValid():
+            return None
+        group = self._resolve_group(group_path)
+        QgsProject.instance().addMapLayer(new_layer, False)
+        group.addLayer(new_layer)
+        return new_layer
 
     # ------------------------------------------------------------------ #
     #  Query builders (PostGIS → SpatiaLite equivalences)

@@ -21,9 +21,9 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QDockWidget
 
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -62,10 +62,8 @@ class QassessmentWizard:
         # Declare instance attributes
         self.actions = []
         self.menu = self.tr(u'&Assessment Wizard')
-
-        # Check if plugin was started the first time in current QGIS session
-        # Must be set in initGui() to survive plugin reloads
-        self.first_start = None
+        self.dock = None
+        self.main_form = None
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -158,41 +156,50 @@ class QassessmentWizard:
         return action
 
     def initGui(self):
-        """Create the menu entries and toolbar icons inside the QGIS GUI."""
+        """Create the menu entries, toolbar icon and dock panel."""
 
         icon_path = ':/plugins/assessment_wizard/icon.png'
         self.add_action(
             icon_path,
-            text=self.tr(u'Wizard'),
+            text=self.tr(u'EMDS Explorer'),
             callback=self.run,
             parent=self.iface.mainWindow())
 
-        # will be set False in run()
-        self.first_start = True
+        # Create the dock panel once — persists for the entire QGIS session.
+        self.main_form = AssessmentMainForm(
+            iface=self.iface,
+            plugin_dir=self.plugin_dir,
+        )
+        self.dock = QDockWidget(self.tr("EMDS – Project Explorer"), self.iface.mainWindow())
+        self.dock.setObjectName("EMDSProjectExplorerDock")  # for QGIS state persistence
+        self.dock.setWidget(self.main_form)
+        self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+        self.dock.hide()  # hidden by default; shown on first toolbar click
 
 
     def unload(self):
-        """Removes the plugin menu item and icon from QGIS GUI."""
+        """Removes the plugin menu item, toolbar icon and dock panel."""
         for action in self.actions:
             self.iface.removePluginMenu(
                 self.tr(u'&Assessment Wizard'),
                 action)
             self.iface.removeToolBarIcon(action)
 
+        if self.dock is not None:
+            self.iface.removeDockWidget(self.dock)
+            if self.main_form is not None:
+                self.main_form.admin_manager.disconnect()
+            self.dock.deleteLater()
+            self.dock = None
+            self.main_form = None
+
 
     def run(self):
-        """Run method that performs all the real work"""
-
-        # Create the main form (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
-            self.first_start = False
-            self.dlg = AssessmentMainForm(
-                iface=self.iface,
-                plugin_dir=self.plugin_dir,
-                parent=self.iface.mainWindow()
-            )
-
-        # show the main form
-        self.dlg.show()
-        self.dlg.exec_()
+        """Toggle the EMDS Project Explorer dock panel."""
+        if self.dock is None:
+            return
+        if self.dock.isVisible():
+            self.dock.hide()
+        else:
+            self.dock.show()
+            self.dock.raise_()

@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Primary/Root form for the Assessment Wizard plugin.
-Provides a main interface with a tree view for project/assessment navigation,
-a button to launch the assessment wizard, and a text area to display details.
 
-Phase 5 (Clean Architecture): added VersionHistoryPanel — a Git-like timeline
-that shows all immutable overlay versions, marks HEAD (★), and exposes
-Rollback and Compare actions for any result node selected in the tree.
+EMDS Project Explorer — QDockWidget panel (like Layers/Browser).
+The dock is created by assessment_wizard.py and persists for the session.
+
+Tree structure:
+  Project → [Base Layers | Assessments] → Assessment → Analyses → v1/v2/...
+
+Action buttons (bottom panel):
+  🗂 New Project · + New Assessment · ▶ Run Analysis · 📊 Compare · ⚙ Settings
 """
 
 import json
@@ -15,10 +18,10 @@ import re
 import sqlite3
 
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QInputDialog, QMessageBox,
     QTreeWidget, QTreeWidgetItem, QMenu, QLabel,
-    QGroupBox, QListWidget, QListWidgetItem
+    QGroupBox, QListWidget, QListWidgetItem, QFrame
 )
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QFont
@@ -32,10 +35,11 @@ ROLE_ID             = Qt.UserRole
 ROLE_TYPE           = Qt.UserRole + 1
 ROLE_OUTPUT_TABLES  = Qt.UserRole + 2
 ROLE_SCENARIO_NAME  = Qt.UserRole + 3   # base scenario name (without __v{n})
+ROLE_NAME           = Qt.UserRole + 4   # raw name (separate from display text)
 
 
 # ---------------------------------------------------------------------------
-#  VersionHistoryPanel — Git-like timeline widget (Phase 5)
+#  VersionHistoryPanel — Git-like timeline widget
 # ---------------------------------------------------------------------------
 
 class VersionHistoryPanel(QGroupBox):
@@ -51,7 +55,7 @@ class VersionHistoryPanel(QGroupBox):
         compare_requested(scenario_name, version_id_a, version_id_b)
     """
 
-    rollback_requested = pyqtSignal(str, int)   # scenario_name, version_id
+    rollback_requested = pyqtSignal(str, int)      # scenario_name, version_id
     compare_requested  = pyqtSignal(str, int, int)  # scenario_name, vid_a, vid_b
 
     def __init__(self, parent=None):
@@ -61,19 +65,16 @@ class VersionHistoryPanel(QGroupBox):
 
         layout = QVBoxLayout(self)
 
-        # Placeholder shown when no result node is selected
-        self._placeholder = QLabel("Select a result node in the tree to view version history.")
+        self._placeholder = QLabel("Select an analysis node to view version history.")
         self._placeholder.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._placeholder)
 
-        # Version list (hidden until populated)
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SingleSelection)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._list)
         self._list.hide()
 
-        # Action buttons
         btn_layout = QHBoxLayout()
 
         self._btn_rollback = QPushButton("\u21ba Rollback to selected")
@@ -154,7 +155,7 @@ class VersionHistoryPanel(QGroupBox):
         self._head_version_id = None
         self._list.clear()
         self._list.hide()
-        self._show_placeholder("Select a result node in the tree to view version history.")
+        self._show_placeholder("Select an analysis node to view version history.")
         self._btn_rollback.setEnabled(False)
         self._btn_compare.setEnabled(False)
 
@@ -176,10 +177,7 @@ class VersionHistoryPanel(QGroupBox):
 
         item = selected[0]
         is_head = item.data(Qt.UserRole + 1)
-
-        # Rollback only makes sense for non-HEAD versions
         self._btn_rollback.setEnabled(not is_head)
-        # Compare: non-HEAD vs HEAD (HEAD must exist)
         self._btn_compare.setEnabled(
             not is_head and self._head_version_id is not None
         )
@@ -204,8 +202,8 @@ class VersionHistoryPanel(QGroupBox):
 # ---------------------------------------------------------------------------
 
 class EMDSTreeModel:
-    """Builds the 5-level EMDS tree:
-    Project → [Base Layers | Assessments] → Assessment → Provenance → Task → Result
+    """Builds the EMDS tree:
+    Project → [Base Layers | Assessments] → Assessment → Analyses → result
     """
 
     @staticmethod
@@ -214,7 +212,7 @@ class EMDSTreeModel:
         """Populate tree_widget from admin_manager data.
 
         Returns:
-            QTreeWidgetItem or None: item that should be re-selected
+            QTreeWidgetItem or None: item to re-select after rebuild.
         """
         if expanded_project_ids is None:
             expanded_project_ids = set()
@@ -229,10 +227,11 @@ class EMDSTreeModel:
         projects = admin_manager.get_all_projects()
         for project in projects:
             proj_item = QTreeWidgetItem(tree_widget)
-            proj_item.setText(0, project['name'])
+            proj_item.setText(0, f"📁 Project: {project['name']}")
             proj_item.setFont(0, bold_font)
-            proj_item.setData(0, ROLE_ID, project['id'])
+            proj_item.setData(0, ROLE_ID,   project['id'])
             proj_item.setData(0, ROLE_TYPE, 'project')
+            proj_item.setData(0, ROLE_NAME, project['name'])
             proj_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
             if selected_type == 'project' and selected_id == project['id']:
@@ -244,60 +243,133 @@ class EMDSTreeModel:
             base_layers = EMDSTreeModel._get_base_layers(project, plugin_dir)
             if base_layers:
                 bl_group = QTreeWidgetItem(proj_item)
-                bl_group.setText(0, "Base Layers")
+                bl_group.setText(0, "🗂 Base Layers")
                 bl_group.setFont(0, italic_font)
-                bl_group.setData(0, ROLE_TYPE, 'group')
+                bl_group.setData(0, ROLE_TYPE, 'base_layers_group')
                 bl_group.setFlags(Qt.ItemIsEnabled)
+                bl_group.setToolTip(0, "🛈 Base layers are immutable inputs — "
+                                       "select them in the wizard to use in an assessment.")
                 if should_expand:
                     bl_group.setExpanded(True)
                 for layer in base_layers:
+                    icon = EMDSTreeModel._geometry_icon(layer['layer_name'])
                     l_item = QTreeWidgetItem(bl_group)
-                    l_item.setText(0, layer['layer_name'])
+                    l_item.setText(0, f"{icon} {layer['layer_name']}")
                     l_item.setData(0, ROLE_TYPE, 'base_layer')
-                    l_item.setFlags(Qt.ItemIsEnabled)
+                    l_item.setData(0, ROLE_NAME, layer['layer_name'])
+                    l_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    l_item.setToolTip(0, f"Immutable base layer — not modified by assessments.")
 
             # Assessments group
             assessments = admin_manager.get_assessments_for_project(project['id'])
             if assessments:
                 ass_group = QTreeWidgetItem(proj_item)
-                ass_group.setText(0, "Assessments")
+                ass_group.setText(0, "📋 Assessments")
                 ass_group.setFont(0, italic_font)
-                ass_group.setData(0, ROLE_TYPE, 'group')
+                ass_group.setData(0, ROLE_TYPE, 'assessments_group')
                 ass_group.setFlags(Qt.ItemIsEnabled)
                 if should_expand:
                     ass_group.setExpanded(True)
 
-                for assessment in assessments:
+                for i, assessment in enumerate(assessments, 1):
+                    status = EMDSTreeModel._assessment_status(assessment)
                     a_item = QTreeWidgetItem(ass_group)
-                    a_item.setText(0, assessment['name'])
-                    a_item.setData(0, ROLE_ID, assessment['id'])
+                    a_item.setText(0, f"{status} {i:02d}_{assessment['name']}")
+                    a_item.setData(0, ROLE_ID,   assessment['id'])
                     a_item.setData(0, ROLE_TYPE, 'assessment')
+                    a_item.setData(0, ROLE_NAME, assessment['name'])
                     a_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
                     if selected_type == 'assessment' and selected_id == assessment['id']:
                         item_to_select = a_item
 
-                    # Provenance children
-                    provenances = admin_manager.get_provenance_for_assessment(assessment['id'])
-                    visibility_cache = admin_manager.get_layer_visibility(assessment['id'])
+                    # ── 🧩 Input Layers ──────────────────────────────────
+                    input_layers = admin_manager.get_assessment_layers(
+                        assessment['id'], 'input'
+                    )
+                    target_name = assessment.get('target_layer', '')
+                    if target_name or input_layers:
+                        inp_group = QTreeWidgetItem(a_item)
+                        inp_group.setText(0, "🧩 Input Layers")
+                        inp_group.setFont(0, italic_font)
+                        inp_group.setData(0, ROLE_TYPE, 'input_layers_group')
+                        inp_group.setFlags(Qt.ItemIsEnabled)
 
-                    for prov in provenances:
-                        p_item = QTreeWidgetItem(a_item)
-                        p_item.setText(0, prov['name'])
-                        p_item.setData(0, ROLE_ID, prov['id'])
-                        p_item.setData(0, ROLE_TYPE, 'provenance')
-                        p_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        if target_name:
+                            icon = EMDSTreeModel._geometry_icon(target_name)
+                            t_item = QTreeWidgetItem(inp_group)
+                            t_item.setText(0, f"{icon} {target_name}  [Target]")
+                            t_item.setData(0, ROLE_TYPE, 'input_layer')
+                            t_item.setData(0, ROLE_NAME, target_name)
+                            t_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                            t_item.setToolTip(
+                                0, "Target layer — defines the spatial extent."
+                            )
+                        for il in input_layers:
+                            icon = EMDSTreeModel._geometry_icon(il['layer_name'])
+                            il_item = QTreeWidgetItem(inp_group)
+                            il_item.setText(0, f"{icon} {il['layer_name']}")
+                            il_item.setData(0, ROLE_TYPE, 'input_layer')
+                            il_item.setData(0, ROLE_NAME, il['layer_name'])
+                            il_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                            il_item.setToolTip(
+                                0, "Assessment layer — overlaid with the target."
+                            )
 
-                        if selected_type == 'provenance' and selected_id == prov['id']:
-                            item_to_select = p_item
+                    # ── 📦 Assessment Output ──────────────────────────────
+                    out_group = QTreeWidgetItem(a_item)
+                    out_group.setText(0, "📦 Assessment Output")
+                    out_group.setFont(0, italic_font)
+                    out_group.setData(0, ROLE_TYPE, 'output_group')
+                    out_group.setFlags(Qt.ItemIsEnabled)
+                    out_group.setToolTip(
+                        0, "Canonical output — always reproducible, not manually editable."
+                    )
 
-                        # Task tree (hierarchical)
-                        task_tree = admin_manager.build_task_tree(prov['id'])
-                        for found in EMDSTreeModel._build_task_items(
-                                p_item, task_tree, assessment['id'],
-                                visibility_cache, selected_type, selected_id):
-                            if found is not None and item_to_select is None:
-                                item_to_select = found
+                    output_tables = assessment.get('output_tables', [])
+                    if not output_tables:
+                        placeholder = QTreeWidgetItem(out_group)
+                        placeholder.setText(0, "  (no output — run assessment)")
+                        placeholder.setFlags(Qt.ItemIsEnabled)
+                    else:
+                        visibility_cache = admin_manager.get_layer_visibility(
+                            assessment['id']
+                        )
+                        all_tables = EMDSTreeModel._collect_analysis_items(
+                            admin_manager, assessment
+                        )
+                        display_tables = all_tables or output_tables
+                        for table_name in display_tables:
+                            scenario_name = re.sub(r'__v\d+$', '', table_name)
+                            v_match = re.search(r'__v(\d+)$', table_name)
+                            label = (
+                                f"📦 v{v_match.group(1)}" if v_match
+                                else f"📦 {table_name}"
+                            )
+                            r_item = QTreeWidgetItem(out_group)
+                            r_item.setText(0, label)
+                            r_item.setData(0, ROLE_ID,            assessment['id'])
+                            r_item.setData(0, ROLE_TYPE,          'result')
+                            r_item.setData(0, ROLE_OUTPUT_TABLES,  [table_name])
+                            r_item.setData(0, ROLE_SCENARIO_NAME,  scenario_name)
+                            r_item.setFlags(
+                                Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                                | Qt.ItemIsUserCheckable
+                            )
+                            is_visible = visibility_cache.get(table_name, True)
+                            r_item.setCheckState(
+                                0, Qt.Checked if is_visible else Qt.Unchecked
+                            )
+                            if selected_type == 'result' and selected_id == assessment['id']:
+                                item_to_select = r_item
+
+                    # ── 📊 Analyses (Level 4 placeholder) ─────────────────
+                    an_group = QTreeWidgetItem(a_item)
+                    an_group.setText(0, "📊 Analyses")
+                    an_group.setFont(0, italic_font)
+                    an_group.setData(0, ROLE_TYPE, 'analyses_group')
+                    an_group.setFlags(Qt.ItemIsEnabled)
+                    an_group.setToolTip(0, "Versioned weighted models — Level 4.")
 
             if should_expand:
                 proj_item.setExpanded(True)
@@ -305,48 +377,55 @@ class EMDSTreeModel:
         return item_to_select
 
     @staticmethod
-    def _build_task_items(parent_item, task_list, assessment_id, visibility_cache,
-                          selected_type, selected_id):
-        """Recursively build task and result nodes. Yields items matching selection."""
+    def _collect_analysis_items(admin_manager, assessment):
+        """Return flat list of all output table names for this assessment (all versions)."""
+        tables = []
+        provenances = admin_manager.get_provenance_for_assessment(assessment['id'])
+        for prov in provenances:
+            task_tree = admin_manager.build_task_tree(prov['id'])
+            EMDSTreeModel._collect_tables_from_tasks(task_tree, tables)
+        return tables
+
+    @staticmethod
+    def _collect_tables_from_tasks(task_list, tables):
+        """Recursively collect output_tables values from a nested task tree."""
         for task in task_list:
-            label = task.get('category') or task.get('operation') or 'Task'
-            t_item = QTreeWidgetItem(parent_item)
-            t_item.setText(0, label)
-            t_item.setData(0, ROLE_ID, task['id'])
-            t_item.setData(0, ROLE_TYPE, 'task')
-            t_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-
-            if selected_type == 'task' and selected_id == task['id']:
-                yield t_item
-
-            # Result nodes (output tables from this task)
             try:
                 output_tables = json.loads(task.get('output_tables') or '[]')
             except (json.JSONDecodeError, TypeError):
                 output_tables = []
-
-            for table_name in output_tables:
-                # Derive base scenario name (strip __v{n} suffix if present)
-                scenario_name = re.sub(r'__v\d+$', '', table_name)
-
-                r_item = QTreeWidgetItem(t_item)
-                r_item.setText(0, table_name)
-                r_item.setData(0, ROLE_ID, assessment_id)
-                r_item.setData(0, ROLE_TYPE, 'result')
-                r_item.setData(0, ROLE_OUTPUT_TABLES, [table_name])
-                r_item.setData(0, ROLE_SCENARIO_NAME, scenario_name)
-                r_item.setFlags(
-                    Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
-                )
-                is_visible = visibility_cache.get(table_name, True)
-                r_item.setCheckState(0, Qt.Checked if is_visible else Qt.Unchecked)
-
-            # Recurse for child tasks
+            tables.extend(output_tables)
             if task.get('children'):
-                yield from EMDSTreeModel._build_task_items(
-                    t_item, task['children'], assessment_id,
-                    visibility_cache, selected_type, selected_id
-                )
+                EMDSTreeModel._collect_tables_from_tasks(task['children'], tables)
+
+    @staticmethod
+    def _geometry_icon(layer_name):
+        """Return a geometry-type emoji by looking up the layer in the active QGIS project.
+
+        Point  → 🔴   Line → 🟦   Polygon → 🟩   Unknown → 🗺
+        """
+        _icons = {0: "🔴", 1: "🟦", 2: "🟩"}
+        layers = QgsProject.instance().mapLayersByName(layer_name)
+        if layers:
+            return _icons.get(int(layers[0].geometryType()), "🗺")
+        return "🗺"
+
+    @staticmethod
+    def _assessment_status(assessment) -> str:
+        """Return a status emoji for the assessment node.
+
+        🟢 Valid        — overlay completed (has output tables)
+        🟡 Needs rebuild — no output tables yet
+        🔴 Broken input — target layer not found in the current QGIS project
+        """
+        output_tables = assessment.get('output_tables', [])
+        target_name   = assessment.get('target_layer', '')
+
+        if not output_tables:
+            if target_name and not QgsProject.instance().mapLayersByName(target_name):
+                return '🔴'
+            return '🟡'
+        return '🟢'
 
     @staticmethod
     def _get_base_layers(project, plugin_dir):
@@ -372,8 +451,8 @@ class EMDSTreeModel:
 #  AssessmentMainForm
 # ---------------------------------------------------------------------------
 
-class AssessmentMainForm(QDialog):
-    """Main form that acts as the parent container for assessment operations."""
+class AssessmentMainForm(QWidget):
+    """Main form — EMDS Project Explorer (content widget for the dock panel)."""
 
     def __init__(self, iface, plugin_dir, parent=None):
         super().__init__(parent)
@@ -382,8 +461,6 @@ class AssessmentMainForm(QDialog):
         self.selected_path = {
             "project_id": None,
             "assessment_id": None,
-            "provenance_id": None,
-            "task_id": None
         }
 
         # Initialize admin manager
@@ -402,51 +479,68 @@ class AssessmentMainForm(QDialog):
             except Exception as e:
                 print(f"Warning: Migration from metadata.db failed: {e}")
 
-        self.setWindowTitle("Assessment Wizard")
-        self.resize(700, 700)
-
-        # Build UI
         layout = QVBoxLayout(self)
 
-        # Buttons row
-        btn_layout = QHBoxLayout()
-
-        self.btn_new_project = QPushButton("New Project")
-        self.btn_new_project.clicked.connect(self._on_new_project)
-        btn_layout.addWidget(self.btn_new_project)
-
-        self.btn_create_assessment = QPushButton("Create Assessment")
-        self.btn_create_assessment.setEnabled(False)
-        self.btn_create_assessment.clicked.connect(self.on_create_assessment)
-        btn_layout.addWidget(self.btn_create_assessment)
-
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        # Tree widget
+        # ── Tree widget ──────────────────────────────────────────────────
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Projects & Assessments"])
+        self.tree.setHeaderLabels(["EMDS – Project Explorer"])
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.currentItemChanged.connect(self._on_tree_selection_changed)
         self.tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.tree, 1)
 
-        # Details area
-        layout.addWidget(QLabel("Details:"))
+        # ── Details text area ────────────────────────────────────────────
         self.results_text_edit = QTextEdit()
         self.results_text_edit.setReadOnly(True)
-        self.results_text_edit.setMaximumHeight(150)
+        self.results_text_edit.setMaximumHeight(100)
         layout.addWidget(self.results_text_edit)
 
-        # Version History panel (Phase 5 — Git-like timeline)
+        # ── Version History panel ────────────────────────────────────────
         self._version_panel = VersionHistoryPanel()
-        self._version_panel.setMaximumHeight(200)
+        self._version_panel.setMaximumHeight(160)
         self._version_panel.rollback_requested.connect(self._on_rollback_version)
         self._version_panel.compare_requested.connect(self._on_compare_versions)
         layout.addWidget(self._version_panel)
 
-        # Populate tree from SQLite
+        # ── Separator ────────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep)
+
+        # ── Action buttons (vertical stack) ──────────────────────────────
+        self.btn_new_project = QPushButton("🗂 New Project")
+        self.btn_new_project.clicked.connect(self._on_new_project)
+        layout.addWidget(self.btn_new_project)
+
+        self.btn_new_assessment = QPushButton("+ New Assessment")
+        self.btn_new_assessment.setEnabled(False)
+        self.btn_new_assessment.clicked.connect(self.on_create_assessment)
+        layout.addWidget(self.btn_new_assessment)
+
+        self.btn_run_analysis = QPushButton("▶ Run Analysis")
+        self.btn_run_analysis.setEnabled(False)
+        self.btn_run_analysis.setToolTip(
+            "Re-run the spatial overlay for the selected assessment (creates a new version)."
+        )
+        self.btn_run_analysis.clicked.connect(self._on_run_analysis)
+        layout.addWidget(self.btn_run_analysis)
+
+        self.btn_compare = QPushButton("📊 Compare")
+        self.btn_compare.setEnabled(False)
+        self.btn_compare.setToolTip(
+            "Load version history for the selected analysis and compare with HEAD."
+        )
+        self.btn_compare.clicked.connect(self._on_compare_clicked)
+        layout.addWidget(self.btn_compare)
+
+        self.btn_settings = QPushButton("⚙ Settings")
+        self.btn_settings.setEnabled(False)  # placeholder
+        self.btn_settings.clicked.connect(self._on_settings)
+        layout.addWidget(self.btn_settings)
+
+        # Populate tree
         self._populate_tree()
 
     # ------------------------------------------------------------------ #
@@ -497,26 +591,22 @@ class AssessmentMainForm(QDialog):
             return
 
         node_type = current.data(0, ROLE_TYPE)
-        if node_type == 'assessment':
-            self._show_assessment_details(current)
-            self._version_panel.clear_panel()
-        elif node_type == 'project':
+        if node_type == 'project':
             self._show_project_details(current)
+            self._version_panel.clear_panel()
+        elif node_type == 'assessment':
+            self._show_assessment_details(current)
             self._version_panel.clear_panel()
         elif node_type == 'result':
             self._show_node_details(current)
             self._load_version_history(current)
-        elif node_type in ('provenance', 'task'):
-            self._show_node_details(current)
-            self._version_panel.clear_panel()
         else:
             self.results_text_edit.clear()
             self._version_panel.clear_panel()
 
     def _update_button_state(self, current):
-        """Update selected_path and button states based on the selected tree item."""
-        path = {"project_id": None, "assessment_id": None,
-                "provenance_id": None, "task_id": None}
+        """Update selected_path and bottom button states based on the selected node."""
+        path = {"project_id": None, "assessment_id": None}
 
         if current:
             node = current
@@ -526,73 +616,68 @@ class AssessmentMainForm(QDialog):
                     path['project_id'] = node.data(0, ROLE_ID)
                 elif ntype == 'assessment' and path['assessment_id'] is None:
                     path['assessment_id'] = node.data(0, ROLE_ID)
-                elif ntype == 'provenance' and path['provenance_id'] is None:
-                    path['provenance_id'] = node.data(0, ROLE_ID)
-                elif ntype == 'task' and path['task_id'] is None:
-                    path['task_id'] = node.data(0, ROLE_ID)
                 node = node.parent()
 
         self.selected_path = path
-        self.btn_create_assessment.setEnabled(path['project_id'] is not None)
+        node_type = current.data(0, ROLE_TYPE) if current else None
+
+        self.btn_new_assessment.setEnabled(path['project_id'] is not None)
+        self.btn_run_analysis.setEnabled(path['assessment_id'] is not None)
+        self.btn_compare.setEnabled(
+            node_type == 'result' and path['assessment_id'] is not None
+        )
 
     def _show_assessment_details(self, item):
-        """Show assessment info in the details area."""
-        assessment_id = item.data(0, ROLE_ID)
+        """Show assessment summary in the details area."""
+        assessment_id   = item.data(0, ROLE_ID)
+        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
+
         project_name = "?"
         parent = item.parent()
         while parent:
             if parent.data(0, ROLE_TYPE) == 'project':
-                project_name = parent.text(0)
+                project_name = parent.data(0, ROLE_NAME) or parent.text(0)
                 break
             parent = parent.parent()
 
+        input_layers  = self.admin_manager.get_assessment_layers(assessment_id, 'input')
         output_layers = self.admin_manager.get_assessment_layers(assessment_id, 'output')
+        input_str  = "\n  - ".join(l['layer_name'] for l in input_layers)  or "None"
         output_str = "\n  - ".join(l['layer_name'] for l in output_layers) or "None"
         text = (
-            f"Project: {project_name}\n"
-            f"Assessment: {item.text(0)}\n"
-            f"Output layers:\n  - {output_str}"
+            f"Project:    {project_name}\n"
+            f"Assessment: {assessment_name}\n"
+            f"Inputs:\n  - {input_str}\n"
+            f"Output(s):\n  - {output_str}"
         )
         self.results_text_edit.setPlainText(text)
 
     def _show_project_details(self, item):
-        """Show project info in the details area."""
+        """Show project summary in the details area."""
         project_id = item.data(0, ROLE_ID)
+        project_name = item.data(0, ROLE_NAME) or item.text(0)
         assessments = self.admin_manager.get_assessments_for_project(project_id)
         text = (
-            f"Project: {item.text(0)}\n"
+            f"Project: {project_name}\n"
             f"Assessments: {len(assessments)}"
         )
         self.results_text_edit.setPlainText(text)
 
     def _show_node_details(self, item):
-        """Show details for provenance, task, or result nodes."""
-        node_type = item.data(0, ROLE_TYPE)
-        if node_type == 'result':
-            tables = item.data(0, ROLE_OUTPUT_TABLES) or []
-            scenario = item.data(0, ROLE_SCENARIO_NAME) or ''
-            self.results_text_edit.setPlainText(
-                f"Result layer: {', '.join(tables)}\n"
-                f"Scenario: {scenario}"
-            )
-        elif node_type == 'provenance':
-            self.results_text_edit.setPlainText(f"Provenance: {item.text(0)}")
-        elif node_type == 'task':
-            self.results_text_edit.setPlainText(f"Task: {item.text(0)}")
+        """Show details for a result (analysis) node."""
+        tables = item.data(0, ROLE_OUTPUT_TABLES) or []
+        scenario = item.data(0, ROLE_SCENARIO_NAME) or ''
+        self.results_text_edit.setPlainText(
+            f"Result layer: {', '.join(tables)}\n"
+            f"Scenario: {scenario}"
+        )
 
     # ------------------------------------------------------------------ #
-    #  Version History panel — Phase 5
+    #  Version History panel
     # ------------------------------------------------------------------ #
 
     def _load_version_history(self, result_item):
-        """Populate the VersionHistoryPanel for the given result node.
-
-        Reads scenario_name from ROLE_SCENARIO_NAME, resolves the project
-        SpatiaLite path via admin_manager, and calls panel.load_versions().
-
-        Args:
-            result_item: QTreeWidgetItem with ROLE_TYPE == 'result'
-        """
+        """Populate the VersionHistoryPanel for the given result node."""
         scenario_name = result_item.data(0, ROLE_SCENARIO_NAME)
         if not scenario_name:
             self._version_panel.clear_panel()
@@ -611,11 +696,7 @@ class AssessmentMainForm(QDialog):
         self._version_panel.load_versions(scenario_name, db_path)
 
     def _on_rollback_version(self, scenario_name, version_id):
-        """Handle rollback signal from VersionHistoryPanel.
-
-        Delegates to AssessmentExecutor → RollbackVersion use case, then
-        refreshes the version panel to reflect the new HEAD.
-        """
+        """Handle rollback signal from VersionHistoryPanel."""
         project_id = self.selected_path.get('project_id')
         if not project_id:
             return
@@ -626,17 +707,12 @@ class AssessmentMainForm(QDialog):
         result = executor.rollback_to_version(scenario_name, version_id, parent_widget=self)
 
         if result:
-            # Refresh the panel so HEAD marker moves
             current = self.tree.currentItem()
             if current and current.data(0, ROLE_TYPE) == 'result':
                 self._load_version_history(current)
 
     def _on_compare_versions(self, scenario_name, version_id_a, version_id_b):
-        """Handle compare signal from VersionHistoryPanel.
-
-        Delegates to AssessmentExecutor → CompareVersions use case.
-        Loads both snapshots as QGIS layers in a 'Comparison' group.
-        """
+        """Handle compare signal from VersionHistoryPanel."""
         project_id = self.selected_path.get('project_id')
         if not project_id:
             return
@@ -649,11 +725,11 @@ class AssessmentMainForm(QDialog):
         )
 
     def _get_project_name(self, project_id):
-        """Return the project display name from the tree for a given project_id."""
+        """Return the raw project name from the tree (ROLE_NAME, not display text)."""
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
             if item.data(0, ROLE_ID) == project_id:
-                return item.text(0)
+                return item.data(0, ROLE_NAME) or item.text(0)
         return ''
 
     # ------------------------------------------------------------------ #
@@ -661,7 +737,7 @@ class AssessmentMainForm(QDialog):
     # ------------------------------------------------------------------ #
 
     def _on_item_changed(self, item, column):
-        """Toggle layer visibility when result checkbox changes and persist state."""
+        """Toggle layer visibility when a result checkbox changes and persist state."""
         if item.data(0, ROLE_TYPE) != 'result':
             return
 
@@ -692,21 +768,57 @@ class AssessmentMainForm(QDialog):
             act.triggered.connect(self._on_new_project)
         else:
             node_type = item.data(0, ROLE_TYPE) or ''
-            if node_type == 'project':
-                act = menu.addAction("New Assessment")
+            if node_type == 'base_layers_group':
+                lbl = menu.addAction("🛈 Base layers are immutable inputs")
+                lbl.setEnabled(False)
+            elif node_type == 'base_layer':
+                act = menu.addAction("🔍 Zoom to Layer")
+                act.triggered.connect(lambda checked, i=item: self._on_zoom_to_base_layer(i))
+                act = menu.addAction("📋 Layer Info")
+                act.triggered.connect(lambda checked, i=item: self._on_base_layer_info(i))
+            elif node_type == 'project':
+                act = menu.addAction("+ New Assessment")
                 act.triggered.connect(self.on_create_assessment)
                 menu.addSeparator()
-                act = menu.addAction("Delete Project")
-                act.triggered.connect(lambda: self._on_delete_project(item))
-            elif node_type == 'assessment':
-                act = menu.addAction("New Version")
-                act.triggered.connect(lambda: self._on_new_version(item))
+                act = menu.addAction("⚙ Project Settings…")
+                act.triggered.connect(lambda checked, i=item: self._on_project_settings(i))
+                act = menu.addAction("📤 Export Metadata…")
+                act.triggered.connect(lambda checked, i=item: self._on_export_project_metadata(i))
+                act = menu.addAction("✓ Validate Project")
+                act.triggered.connect(lambda checked, i=item: self._on_validate_project(i))
                 menu.addSeparator()
-                act = menu.addAction("Delete Assessment")
-                act.triggered.connect(lambda: self._on_delete_assessment(item))
-            elif node_type == 'provenance':
-                act = menu.addAction("Delete Provenance")
-                act.triggered.connect(lambda: self._on_delete_provenance(item))
+                act = menu.addAction("🗑 Delete Project…")
+                act.triggered.connect(lambda checked, i=item: self._on_delete_project(i))
+            elif node_type == 'assessment':
+                act = menu.addAction("🔄 Rebuild Assessment")
+                act.triggered.connect(lambda checked, i=item: self._on_new_version(i))
+                act = menu.addAction("✏ Rename…")
+                act.triggered.connect(lambda checked, i=item: self._on_rename_assessment(i))
+                act = menu.addAction("📋 Duplicate (New Scenario)…")
+                act.triggered.connect(
+                    lambda checked, i=item: self._on_duplicate_assessment(i)
+                )
+                menu.addSeparator()
+                act = menu.addAction("🗑 Delete Assessment…")
+                act.triggered.connect(lambda checked, i=item: self._on_delete_assessment(i))
+            elif node_type == 'input_layers_group':
+                lbl = menu.addAction("🛈 Input layers define the spatial overlay")
+                lbl.setEnabled(False)
+            elif node_type == 'input_layer':
+                act = menu.addAction("🔍 Zoom to Layer")
+                act.triggered.connect(
+                    lambda checked, i=item: self._on_zoom_to_base_layer(i)
+                )
+                act = menu.addAction("📋 Layer Info")
+                act.triggered.connect(
+                    lambda checked, i=item: self._on_base_layer_info(i)
+                )
+            elif node_type == 'output_group':
+                lbl = menu.addAction("🛈 Canonical output — always reproducible")
+                lbl.setEnabled(False)
+            elif node_type == 'analyses_group':
+                lbl = menu.addAction("📊 Versioned models — coming in Level 4")
+                lbl.setEnabled(False)
             elif node_type == 'result':
                 act = menu.addAction("Toggle Visibility")
                 act.triggered.connect(lambda: self._toggle_result_visibility(item))
@@ -717,11 +829,71 @@ class AssessmentMainForm(QDialog):
         menu.exec_(self.tree.viewport().mapToGlobal(position))
 
     # ------------------------------------------------------------------ #
+    #  Action button handlers
+    # ------------------------------------------------------------------ #
+
+    def _on_run_analysis(self):
+        """Re-run spatial overlay for the selected assessment (new version)."""
+        node = self.tree.currentItem()
+        while node:
+            if node.data(0, ROLE_TYPE) == 'assessment':
+                self._on_new_version(node)
+                return
+            node = node.parent()
+
+    def _on_compare_clicked(self):
+        """Load version history for the selected analysis node (use panel to compare)."""
+        current = self.tree.currentItem()
+        if current and current.data(0, ROLE_TYPE) == 'result':
+            self._load_version_history(current)
+
+    def _on_settings(self):
+        """Open settings dialog (placeholder)."""
+        QMessageBox.information(self, "Settings", "Settings not yet implemented.")
+
+    # ------------------------------------------------------------------ #
     #  CRUD actions
     # ------------------------------------------------------------------ #
 
+    def _on_zoom_to_base_layer(self, item):
+        """Zoom the QGIS canvas to the selected base layer."""
+        layer_name = item.data(0, ROLE_NAME) or item.text(0)
+        layers = QgsProject.instance().mapLayersByName(layer_name)
+        if layers:
+            self.iface.setActiveLayer(layers[0])
+            self.iface.zoomToActiveLayer()
+        else:
+            QMessageBox.information(
+                self, "Layer Not Found",
+                f"'{layer_name}' is not currently loaded in the QGIS project."
+            )
+
+    def _on_base_layer_info(self, item):
+        """Show basic info about the selected base layer."""
+        layer_name = item.data(0, ROLE_NAME) or item.text(0)
+        layers = QgsProject.instance().mapLayersByName(layer_name)
+        if layers:
+            layer = layers[0]
+            gt_labels = {0: "Point", 1: "Line", 2: "Polygon"}
+            gt = gt_labels.get(int(layer.geometryType()), "Unknown")
+            feat_count = layer.featureCount()
+            crs = layer.crs().authid()
+            QMessageBox.information(
+                self, f"Layer Info — {layer_name}",
+                f"Name:         {layer_name}\n"
+                f"Geometry:     {gt}\n"
+                f"Features:     {feat_count}\n"
+                f"CRS:          {crs}\n\n"
+                f"🛈 This is an immutable base layer."
+            )
+        else:
+            QMessageBox.information(
+                self, "Layer Not Found",
+                f"'{layer_name}' is not currently loaded in the QGIS project."
+            )
+
     def _on_new_project(self):
-        """Open a QInputDialog to create a new project."""
+        """Create a new project via QInputDialog."""
         name, ok = QInputDialog.getText(self, "New Project", "Project Name:")
         if ok and name.strip():
             try:
@@ -730,22 +902,52 @@ class AssessmentMainForm(QDialog):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Could not create project:\n{str(e)}")
 
-    def _on_delete_project(self, item):
-        """Delete a project after confirmation."""
-        project_name = item.text(0)
-        project_id = item.data(0, ROLE_ID)
-        reply = QMessageBox.question(
-            self, "Delete Project",
-            f"Delete project '{project_name}' and all its assessments?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+    def _on_project_settings(self, item):
+        """Open project settings (placeholder)."""
+        project_name = item.data(0, ROLE_NAME) or item.text(0)
+        QMessageBox.information(
+            self, "Project Settings",
+            f"Project settings for '{project_name}' — not yet implemented."
         )
-        if reply == QMessageBox.Yes:
+
+    def _on_export_project_metadata(self, item):
+        """Export project metadata to JSON (placeholder)."""
+        project_name = item.data(0, ROLE_NAME) or item.text(0)
+        QMessageBox.information(
+            self, "Export Metadata",
+            f"Export metadata for '{project_name}' — not yet implemented."
+        )
+
+    def _on_validate_project(self, item):
+        """Validate project integrity (placeholder)."""
+        project_name = item.data(0, ROLE_NAME) or item.text(0)
+        QMessageBox.information(
+            self, "Validate Project",
+            f"Validation for '{project_name}' — not yet implemented."
+        )
+
+    def _on_delete_project(self, item):
+        """Delete a project — requires typing the project name to confirm."""
+        project_name = item.data(0, ROLE_NAME) or item.text(0)
+        project_id = item.data(0, ROLE_ID)
+
+        typed, ok = QInputDialog.getText(
+            self, "Delete Project",
+            f"This will permanently delete '{project_name}' and ALL its assessments.\n\n"
+            f"Type the project name to confirm:"
+        )
+        if ok and typed.strip() == project_name:
             self.admin_manager.delete_project(project_id)
             self._populate_tree()
+        elif ok:
+            QMessageBox.warning(
+                self, "Delete Cancelled",
+                "Project name did not match. No changes were made."
+            )
 
     def _on_delete_assessment(self, item):
         """Delete an assessment after confirmation."""
-        assessment_name = item.text(0)
+        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
         assessment_id = item.data(0, ROLE_ID)
         reply = QMessageBox.question(
             self, "Delete Assessment",
@@ -756,21 +958,32 @@ class AssessmentMainForm(QDialog):
             self.admin_manager.delete_assessment(assessment_id)
             self._populate_tree()
 
-    def _on_delete_provenance(self, item):
-        """Delete a provenance record after confirmation."""
-        prov_name = item.text(0)
-        prov_id = item.data(0, ROLE_ID)
-        reply = QMessageBox.question(
-            self, "Delete Provenance",
-            f"Delete provenance '{prov_name}' and all its tasks?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+    def _on_rename_assessment(self, item):
+        """Rename an assessment via QInputDialog."""
+        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
+        assessment_id = item.data(0, ROLE_ID)
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Assessment",
+            f"New name for '{assessment_name}':",
+            text=assessment_name
         )
-        if reply == QMessageBox.Yes:
-            self.admin_manager.delete_provenance(prov_id)
-            self._populate_tree()
+        if ok and new_name.strip() and new_name.strip() != assessment_name:
+            try:
+                self.admin_manager.rename_assessment(assessment_id, new_name.strip())
+                self._populate_tree()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Could not rename:\n{str(e)}")
+
+    def _on_duplicate_assessment(self, item):
+        """Duplicate an assessment as a new scenario (placeholder)."""
+        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
+        QMessageBox.information(
+            self, "Duplicate Assessment",
+            f"Duplicate '{assessment_name}' — not yet implemented."
+        )
 
     def _toggle_result_visibility(self, item):
-        """Toggle the checkbox state of a result item."""
+        """Toggle the checkbox state of a result (analysis) item."""
         current_state = item.checkState(0)
         new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
         item.setCheckState(0, new_state)
@@ -782,9 +995,7 @@ class AssessmentMainForm(QDialog):
         if not project_id:
             return
 
-        assessment_name = item.text(0)
-
-        # Check if the assessment has input layers (spatial assessment)
+        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
         input_layers = self.admin_manager.get_assessment_layers(
             assessment_id, layer_type='input'
         )
@@ -820,7 +1031,6 @@ class AssessmentMainForm(QDialog):
             QMessageBox.warning(self, "No Project", "Please select or create a project first.")
             return
 
-        # Resolve project name from tree
         project_name = self._get_project_name(project_id)
         if not project_name:
             QMessageBox.warning(self, "Error", "Could not resolve project name.")
@@ -844,7 +1054,7 @@ class AssessmentMainForm(QDialog):
             self.results_text_edit.setPlainText("Assessment cancelled.")
 
     def display_results(self, results):
-        """Format and display the wizard results in the text area."""
+        """Format and display the wizard results in the details area."""
         assessment_layers_str = ", ".join(results.get("assessment_layers", [])) or "None"
         output_tables_str = "\n  - ".join(results.get("output_tables", [])) or "None"
         text = (
@@ -861,13 +1071,8 @@ class AssessmentMainForm(QDialog):
     # ------------------------------------------------------------------ #
 
     def showEvent(self, event):
-        """Reconnect admin manager when form is shown again."""
+        """Reconnect admin manager when panel is shown again."""
         if self.admin_manager.connection is None:
             self.admin_manager.connect()
             self._populate_tree()
         super().showEvent(event)
-
-    def closeEvent(self, event):
-        """Clean up admin manager on close."""
-        self.admin_manager.disconnect()
-        super().closeEvent(event)
