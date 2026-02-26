@@ -1,0 +1,218 @@
+# -*- coding: utf-8 -*-
+"""WeightsEditDialog + AnalysisDetailPanel — MCDA analysis panels."""
+
+import json
+
+from qgis.PyQt.QtWidgets import (
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QDoubleSpinBox, QFrame, QMessageBox,
+)
+from qgis.PyQt.QtCore import pyqtSignal
+from qgis.PyQt.QtGui import QFont
+
+
+class WeightsEditDialog(QDialog):
+    """Modal dialog for editing per-layer MCDA weights.
+
+    Shows each assessment input layer with a QDoubleSpinBox (0–100 %).
+    Validates that weights sum to 100 % before saving to admin.sqlite.
+    """
+
+    def __init__(self, assessment_id, admin_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit MCDA Weights")
+        self.assessment_id  = assessment_id
+        self.admin_manager  = admin_manager
+        self._spinboxes     = {}   # layer_name → QDoubleSpinBox
+
+        layout = QVBoxLayout(self)
+
+        config       = admin_manager.get_analysis_config(assessment_id) or {}
+        weights      = json.loads(config.get('weights_json') or '{}')
+        input_layers = admin_manager.get_assessment_layers(assessment_id, 'input')
+        layer_names  = [il['layer_name'] for il in input_layers]
+
+        # Also include any layers already in the weights dict but not in input_layers
+        for k in weights:
+            if k not in layer_names:
+                layer_names.append(k)
+
+        layout.addWidget(QLabel("Set weights per assessment layer (must sum to 100 %):"))
+
+        form = QGridLayout()
+        n = len(layer_names) or 1
+        for row, name in enumerate(layer_names):
+            lbl  = QLabel(name)
+            spin = QDoubleSpinBox()
+            spin.setRange(0, 100)
+            spin.setSuffix(" %")
+            spin.setDecimals(1)
+            spin.setValue(round(weights.get(name, 1.0 / n) * 100, 1))
+            self._spinboxes[name] = spin
+            form.addWidget(lbl,  row, 0)
+            form.addWidget(spin, row, 1)
+        layout.addLayout(form)
+
+        self._lbl_total = QLabel()
+        layout.addWidget(self._lbl_total)
+        for spin in self._spinboxes.values():
+            spin.valueChanged.connect(self._update_total)
+        self._update_total()
+
+        btn_row    = QHBoxLayout()
+        btn_save   = QPushButton("Save")
+        btn_save.clicked.connect(self._on_save)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+    def _update_total(self):
+        total = sum(s.value() for s in self._spinboxes.values())
+        color = "green" if abs(total - 100) < 0.1 else "red"
+        self._lbl_total.setText(
+            f'<span style="color:{color}">Total: {total:.1f}% '
+            f'(must be 100%)</span>'
+        )
+
+    def _on_save(self):
+        total = sum(s.value() for s in self._spinboxes.values())
+        if abs(total - 100) > 0.5:
+            QMessageBox.warning(
+                self, "Invalid Weights",
+                f"Weights must sum to 100%. Currently: {total:.1f}%"
+            )
+            return
+        weights = {name: round(s.value() / 100, 4)
+                   for name, s in self._spinboxes.items()}
+        self.admin_manager.update_analysis_config(self.assessment_id, weights=weights)
+        self.accept()
+
+
+class AnalysisDetailPanel(QWidget):
+    """Structured detail card shown when an analysis node is selected.
+
+    Displays:
+        Analysis name (Model_v{n}) · Model type · Weights per layer
+        Score column name · [ Edit Weights ] and [ Run Again ] buttons
+
+    Emits:
+        run_again_clicked(assessment_id, table_name)
+    """
+
+    run_again_clicked = pyqtSignal(int, str)   # assessment_id, table_name
+
+    def __init__(self, admin_manager, parent=None):
+        super().__init__(parent)
+        self._admin_manager = admin_manager
+        self._assessment_id = None
+        self._table_name    = None
+        self._model_name    = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
+
+        bold    = QFont(); bold.setBold(True)
+        sm_bold = QFont(); sm_bold.setBold(True)
+
+        # Title
+        self._lbl_title = QLabel("—")
+        self._lbl_title.setFont(bold)
+        layout.addWidget(self._lbl_title)
+
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep1)
+
+        # Output table row
+        tbl_row = QHBoxLayout()
+        lbl_tbl_h = QLabel("Output:")
+        lbl_tbl_h.setFont(sm_bold)
+        tbl_row.addWidget(lbl_tbl_h)
+        self._lbl_table = QLabel("—")
+        self._lbl_table.setWordWrap(True)
+        tbl_row.addWidget(self._lbl_table)
+        tbl_row.addStretch()
+        layout.addLayout(tbl_row)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep2)
+
+        # Weights (read-only)
+        lbl_w_h = QLabel("⚙ Weights used:")
+        lbl_w_h.setFont(sm_bold)
+        layout.addWidget(lbl_w_h)
+        self._lbl_weights = QLabel("—")
+        self._lbl_weights.setWordWrap(True)
+        self._lbl_weights.setContentsMargins(10, 0, 0, 0)
+        layout.addWidget(self._lbl_weights)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        sep3.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep3)
+
+        # Run Again button
+        self._btn_run = QPushButton("▶ Run Again")
+        self._btn_run.clicked.connect(self._on_run_again)
+        layout.addWidget(self._btn_run)
+
+    # ------------------------------------------------------------------ #
+    #  Public API
+    # ------------------------------------------------------------------ #
+
+    def load(self, assessment_id, table_name, model_name):
+        """Populate the panel with data for the given analysis node.
+
+        Args:
+            assessment_id: int
+            table_name:    str — the specific versioned overlay table name
+            model_name:    str — display name (e.g. "Analysis v2")
+        """
+        self._assessment_id = assessment_id
+        self._table_name    = table_name
+        self._model_name    = model_name
+        self._lbl_title.setText(f"🔁 {model_name}")
+        self._lbl_table.setText(table_name or "—")
+
+        # Prefer the snapshot tied to this specific output table (preserves history);
+        # fall back to the current Default config if no snapshot exists yet.
+        config = (
+            self._admin_manager.get_analysis_for_output_table(table_name)
+            if table_name else None
+        ) or self._admin_manager.get_analysis_config(assessment_id)
+
+        if config:
+            weights = json.loads(config.get('weights_json') or '{}')
+            if weights:
+                self._lbl_weights.setText(
+                    "\n".join(f"  {name}: {round(w * 100, 1)}%"
+                              for name, w in weights.items())
+                )
+            else:
+                self._lbl_weights.setText("  (no weights configured)")
+        else:
+            self._lbl_weights.setText("  (no config)")
+
+    def clear(self):
+        """Reset to empty/default state."""
+        self._assessment_id = None
+        self._table_name    = None
+        self._model_name    = None
+        self._lbl_title.setText("—")
+        self._lbl_table.setText("—")
+        self._lbl_weights.setText("—")
+
+    # ------------------------------------------------------------------ #
+    #  Private handlers
+    # ------------------------------------------------------------------ #
+
+    def _on_run_again(self):
+        if self._assessment_id is not None and self._table_name:
+            self.run_again_clicked.emit(self._assessment_id, self._table_name)

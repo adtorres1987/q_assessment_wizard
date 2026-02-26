@@ -73,48 +73,81 @@ class ApplyOverlay:
         version_ids   = []
 
         from ...spatial_engine import SpatialEngine
-        from ....spatial_analysis_spatialite import SpatialAnalyzerLite
 
         with SpatialEngine(project_db_path) as engine:
-            analyzer = SpatialAnalyzerLite(engine._repo.project_manager)
 
-            # Migrate all layers → populate table_name + add INPUT_ copies to group
+            # Migrate all layers → populate table_name (no INPUT_ copies in QGIS panel)
             for layer_ref in scenario['all_layers']:
                 qgs_layer = qgs_layer_map[layer_ref['name']]
                 layer_ref['table_name'] = engine.prepare_layer(qgs_layer)
-                analyzer.add_layer_to_group(
-                    qgs_layer,
-                    group_path=assessment_group,
-                    display_name=f"INPUT_{layer_ref['name']}",
-                )
 
-            # Run versioned overlay per assessment layer
-            for a_ref in scenario['assessment_layers']:
-                base_name = self._make_base_name(
-                    cmd.project_id, cmd.assessment_name,
-                    a_ref['name'], len(scenario['assessment_layers'])
+            # Merge all assessment layers into one temporary table so the
+            # overlay runs once and produces a single output.
+            assessment_tables = [
+                a['table_name'] for a in scenario['assessment_layers']
+            ]
+            if len(assessment_tables) == 1:
+                overlay_assessment_table = assessment_tables[0]
+                merged_temp = None
+            else:
+                merged_temp = engine._repo.sanitize_name(
+                    f"_merged_{cmd.assessment_name}"
                 )
-                # v2+ goes into a sub-group; v1 goes directly in the assessment group
-                existing = engine._repo.get_versions(
-                    engine._repo.sanitize_name(base_name)
+                union_sql = " UNION ALL ".join(
+                    f"SELECT geom FROM {t}" for t in assessment_tables
                 )
-                if existing:
-                    next_v = len(existing) + 1
-                    group_name = f"{assessment_group}/v{next_v}_{cmd.assessment_name}"
-                    display_name = f"Result_v{next_v}"
-                else:
-                    group_name = assessment_group
-                    display_name = f"OUTPUT_{cmd.assessment_name}"
+                conn = engine._repo.project_manager.connection
+                cursor = conn.cursor()
 
-                result = engine.overlay(
-                    scenario['target_layer']['table_name'],
-                    a_ref['table_name'],
-                    base_name,
-                    group_name=group_name,
-                    layer_display_name=display_name,
+                # Get SRID from first assessment table
+                cursor.execute(
+                    "SELECT srid FROM geometry_columns "
+                    "WHERE f_table_name = ? AND f_geometry_column = 'geom'",
+                    (assessment_tables[0],)
                 )
-                output_tables.append(result['table'])
-                version_ids.append(result['version_id'])
+                row = cursor.fetchone()
+                srid = row[0] if row else 4326
+
+                conn.execute(f"DROP TABLE IF EXISTS {merged_temp}")
+                conn.execute(
+                    f"CREATE TABLE {merged_temp} AS {union_sql}"
+                )
+                # Register geometry so validate_geometry_compatibility finds it
+                cursor.execute(
+                    f"SELECT RecoverGeometryColumn("
+                    f"'{merged_temp}', 'geom', {srid}, 'MULTIPOLYGON', 'XY')"
+                )
+                cursor.close()
+                conn.commit()
+                overlay_assessment_table = merged_temp
+
+            # Single overlay → single output
+            base_name = f"{cmd.project_id}__{cmd.assessment_name}"
+            existing = engine._repo.get_versions(
+                engine._repo.sanitize_name(base_name)
+            )
+            group_name = assessment_group
+            if existing:
+                next_v = len(existing) + 1
+                display_name = f"Result_v{next_v}"
+            else:
+                display_name = f"OUTPUT_{cmd.assessment_name}"
+
+            result = engine.overlay(
+                scenario['target_layer']['table_name'],
+                overlay_assessment_table,
+                base_name,
+                group_name=group_name,
+                layer_display_name=display_name,
+            )
+            output_tables.append(result['table'])
+            version_ids.append(result['version_id'])
+
+            # Drop temporary merged table
+            if merged_temp:
+                conn = engine._repo.project_manager.connection
+                conn.execute(f"DROP TABLE IF EXISTS {merged_temp}")
+                conn.commit()
 
         return {
             'assessment_name':    cmd.assessment_name,

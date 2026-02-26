@@ -243,7 +243,7 @@ class SpatialAnalyzerLite:
         FROM (
             SELECT
                 a.id AS input_id,
-                b.id AS identity_id,
+                b.rowid AS identity_id,
                 CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
                 'intersect' AS split_type
             FROM {target_table} a
@@ -283,48 +283,50 @@ class SpatialAnalyzerLite:
         """
 
     def _build_both_query(self, target_table, assessment_table, output_table):
-        """Build query for both intersection and non-intersection.
-        Uses subquery to compute Intersection() once per feature pair.
+        """Build overlay query with dissolved assessment to avoid
+        overlapping intersection artifacts and double-counting.
+        Produces a single clean output layer.
         """
         return f"""
         CREATE TABLE {output_table} AS
-        SELECT
-            input_id,
-            identity_id,
-            geom,
-            split_type,
-            Area(geom) AS shape_area,
-            Perimeter(geom) AS shape_length
-        FROM (
+
+        WITH dissolved_assessment AS (
             SELECT
-                a.id AS input_id,
-                b.id AS identity_id,
-                CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
-                'intersect' AS split_type
-            FROM {target_table} a
-            JOIN {assessment_table} b
-              ON Intersects(a.geom, b.geom)
-            WHERE IsValid(a.geom)
-              AND IsValid(b.geom)
-        ) sub
-        WHERE geom IS NOT NULL
-          AND IsValid(geom)
-          AND GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+                MakeValid(CastToMultiPolygon(GUnion(geom))) AS geom
+            FROM {assessment_table}
+            WHERE IsValid(geom)
+              AND GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+        )
+
+        SELECT
+            a.id AS input_id,
+            1 AS identity_id,
+            CastToMultiPolygon(
+                MakeValid(Intersection(a.geom, d.geom))
+            ) AS geom,
+            'intersect' AS split_type,
+            Area(Intersection(a.geom, d.geom)) AS shape_area,
+            Perimeter(Intersection(a.geom, d.geom)) AS shape_length
+        FROM {target_table} a
+        CROSS JOIN dissolved_assessment d
+        WHERE IsValid(a.geom)
+          AND Intersects(a.geom, d.geom)
 
         UNION ALL
 
         SELECT
             a.id AS input_id,
             NULL AS identity_id,
-            CastToMultiPolygon(a.geom) AS geom,
+            CastToMultiPolygon(
+                MakeValid(Difference(a.geom, d.geom))
+            ) AS geom,
             'no_overlap' AS split_type,
-            Area(a.geom) AS shape_area,
-            Perimeter(a.geom) AS shape_length
+            Area(Difference(a.geom, d.geom)) AS shape_area,
+            Perimeter(Difference(a.geom, d.geom)) AS shape_length
         FROM {target_table} a
-        LEFT JOIN {assessment_table} b
-          ON Intersects(a.geom, b.geom)
-        WHERE b.id IS NULL
-          AND IsValid(a.geom)
+        CROSS JOIN dissolved_assessment d
+        WHERE IsValid(a.geom)
+          AND NOT ST_Equals(Difference(a.geom, d.geom), GeomFromText('POLYGON EMPTY'))
         """
 
     # ------------------------------------------------------------------ #
