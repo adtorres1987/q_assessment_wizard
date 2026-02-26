@@ -265,7 +265,8 @@ class AssessmentExecutor:
             assessment_id=assessment_id,
             output_tables=output_tables,
             target_layer_name=target_layer_name,
-            assessment_layer_names=[al['layer_name'] for al in input_layers]
+            assessment_layer_names=[al['layer_name'] for al in input_layers],
+            run_name=f"Run v{next_v}"
         )
 
         # Snapshot weights for this new version (preserves history)
@@ -376,11 +377,14 @@ class AssessmentExecutor:
                 )
 
             if wizard_results.get('assessment_layers'):
+                _tables = wizard_results.get('output_tables', [])
+                _v = int(re.search(r'__v(\d+)$', _tables[0]).group(1)) if _tables and re.search(r'__v(\d+)$', _tables[0]) else 1
                 self._record_provenance(
                     assessment_id=existing_assessment_id,
-                    output_tables=wizard_results.get('output_tables', []),
+                    output_tables=_tables,
                     target_layer_name=wizard_results.get('target_layer', ''),
-                    assessment_layer_names=wizard_results.get('assessment_layers', [])
+                    assessment_layer_names=wizard_results.get('assessment_layers', []),
+                    run_name=f"Run v{_v}"
                 )
 
             # Auto-create MCDA config with equal weights if not yet configured
@@ -437,11 +441,14 @@ class AssessmentExecutor:
                 self.admin_manager.set_layer_visibility(assessment_id, table_name, True)
 
             if wizard_results.get('assessment_layers'):
+                _tables = wizard_results.get('output_tables', [])
+                _v = int(re.search(r'__v(\d+)$', _tables[0]).group(1)) if _tables and re.search(r'__v(\d+)$', _tables[0]) else 1
                 self._record_provenance(
                     assessment_id=assessment_id,
-                    output_tables=wizard_results.get('output_tables', []),
+                    output_tables=_tables,
                     target_layer_name=wizard_results.get('target_layer', ''),
-                    assessment_layer_names=wizard_results.get('assessment_layers', [])
+                    assessment_layer_names=wizard_results.get('assessment_layers', []),
+                    run_name=f"Run v{_v}"
                 )
 
                 # Auto-create MCDA config with equal weights on first spatial assessment
@@ -468,20 +475,22 @@ class AssessmentExecutor:
             return None
 
     def _record_provenance(self, assessment_id, output_tables,
-                           target_layer_name, assessment_layer_names):
+                           target_layer_name, assessment_layer_names,
+                           run_name="Run v1"):
         """Create provenance + task_details entries in admin.sqlite."""
         if not self.admin_manager:
             return
+        operation = "union+intersect"
         try:
             provenance_id = self.admin_manager.create_provenance(
                 assessment_id=assessment_id,
-                name="Initial Assessment",
+                name=run_name,
                 description="Base spatial analysis: union + intersection"
             )
             self.admin_manager.add_task(
                 provenance_id=provenance_id,
                 step_order=1,
-                operation="union+intersect",
+                operation=operation,
                 category="spatial_analysis",
                 engine_type="spatialite",
                 input_tables=[target_layer_name] + assessment_layer_names,
