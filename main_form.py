@@ -538,8 +538,8 @@ class AssessmentMainForm(QWidget):
     # ------------------------------------------------------------------ #
 
     def showEvent(self, event):
-        """Reconnect admin manager when panel is shown again."""
+        """Refresh tree every time the panel becomes visible."""
         if self.admin_manager.connection is None:
             self.admin_manager.connect()
-            self._populate_tree()
+        self._populate_tree()
         super().showEvent(event)

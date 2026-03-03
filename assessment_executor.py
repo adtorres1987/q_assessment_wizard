@@ -451,7 +451,7 @@ class AssessmentExecutor:
                     run_name=f"Run v{_v}"
                 )
 
-                # Auto-create MCDA config with equal weights on first spatial assessment
+                # Auto-create MCDA config with equal weights on first spatial assessment: FORMULA
                 assessment_layer_names = wizard_results.get('assessment_layers', [])
                 n = len(assessment_layer_names)
                 weights = (
@@ -565,7 +565,7 @@ class AssessmentExecutor:
                 except Exception:
                     pass  # column already exists — fine
 
-                # Weighted area-proportional score
+                # Weighted area-proportional score (CALCULATION):
                 conn.execute(f"""
                     UPDATE "{table_name}"
                     SET "{score_column}" = {matched_weight} * (
