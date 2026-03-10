@@ -15,10 +15,9 @@ class AssessmentDetailPanel(QWidget):
 
     Displays:
         Assessment name · Target layer · Created date · Feature count
-        Weights per layer · [ ✏ Edit Weights ] [ 🔄 Rebuild ] buttons
+        Weights per layer · [ ✏ Edit Weights ] button
     """
 
-    rebuild_clicked    = pyqtSignal()
     weights_edit_clicked = pyqtSignal(int)   # emits assessment_id
 
     def __init__(self, parent=None):
@@ -84,16 +83,6 @@ class AssessmentDetailPanel(QWidget):
         self._lbl_weights.setWordWrap(True)
         self._lbl_weights.setContentsMargins(10, 0, 0, 0)
         layout.addWidget(self._lbl_weights)
-
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(sep3)
-
-        # — Rebuild button
-        self._btn_rebuild = QPushButton("🔄 Rebuild")
-        self._btn_rebuild.clicked.connect(self.rebuild_clicked)
-        layout.addWidget(self._btn_rebuild)
 
     def show_assessment(self, name, input_layers, target_layer, created_at,
                         assessment_id=None, weights=None):

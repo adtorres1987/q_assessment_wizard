@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-SpatialEngine — main facade for all spatial operations in the plugin.
-
-Versioning model:
-  - Each overlay run creates a NEW table: {base_name}__v{n}  (n = 1, 2, 3, ...)
-  - The active result is tracked by `spatial_versions.is_current = 1` in the
-    project's SpatiaLite database.
-  - Rolling back to a previous version just moves the HEAD pointer — no
-    spatial data is recalculated.
+SpatialEngine — infrastructure facade for all SpatiaLite spatial operations.
 
 Clean Architecture position:
-    UI → AssessmentExecutor → SpatialEngine → Repository → ProjectManager / SpatialAnalyzerLite
-                                                ↑ Infrastructure boundary
+    core/infrastructure/spatial/  ← this file
+        ↑ implements SpatialEnginePort (application/ports/)
+        ↓ uses SpatialRepository → ProjectManager
 """
 
 from .repository import SpatialRepository
@@ -29,22 +23,9 @@ class SpatialEngine:
                 "project__assessment",
                 group_name="Output Layers"
             )
-            engine.rollback_to_version("project__assessment", version_id=1)
-
-    Usage (manual lifecycle):
-        engine = SpatialEngine(db_path)
-        engine.open()
-        try:
-            ...
-        finally:
-            engine.close()
     """
 
     def __init__(self, db_path):
-        """
-        Args:
-            db_path: str — absolute path to the project's SpatiaLite .sqlite file
-        """
         self._db_path = db_path
         self._repo = None
         self._ops = None
@@ -54,13 +35,11 @@ class SpatialEngine:
     # ------------------------------------------------------------------ #
 
     def open(self):
-        """Open the SpatiaLite connection and initialise internal components."""
         self._repo = SpatialRepository(self._db_path)
         self._repo.open()
         self._ops = OperationRunner(self._repo)
 
     def close(self):
-        """Close the SpatiaLite connection."""
         if self._repo:
             self._repo.close()
             self._repo = None
@@ -72,7 +51,7 @@ class SpatialEngine:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-        return False  # never suppress exceptions
+        return False
 
     # ------------------------------------------------------------------ #
     #  Layer preparation
@@ -80,11 +59,6 @@ class SpatialEngine:
 
     def prepare_layer(self, qgs_layer):
         """Ensure a QGIS layer exists in SpatiaLite (migrate if needed).
-
-        Idempotent — safe to call multiple times for the same layer.
-
-        Args:
-            qgs_layer: QgsVectorLayer
 
         Returns:
             str: sanitized SpatiaLite table name
@@ -109,11 +83,6 @@ class SpatialEngine:
 
         Each step intersects the previous result with one assessment layer,
         keeping non-intersecting features as 'no_overlap'.
-
-        Step 1: target ∩ assessment[0]          → _step_0_tmp
-        Step 2: _step_0_tmp ∩ assessment[1]     → _step_1_tmp
-        ...
-        Last:   _step_{n-2} ∩ assessment[n-1]   → {base}__v{m}
 
         Args:
             target_table:       str — sanitized source table in SpatiaLite
@@ -164,72 +133,67 @@ class SpatialEngine:
         return {'table': final_table, 'version_id': version_id, 'layer': layer}
 
     # ------------------------------------------------------------------ #
+    #  MCDA scoring
+    # ------------------------------------------------------------------ #
+
+    def score_table(self, table_name: str, score_column: str, weight: float):
+        """Add and populate a weighted area-proportional score column.
+
+        Executes:
+          ALTER TABLE ... ADD COLUMN {score_column} REAL DEFAULT 0
+          UPDATE ... SET {score_column} = weight * (ST_Area(geom) / total_area)
+
+        Idempotent: if the column already exists, only the UPDATE runs.
+
+        Args:
+            table_name:   SpatiaLite table to score.
+            score_column: Name of the score column to add/update.
+            weight:       Multiplier for the area fraction (0.0–1.0).
+        """
+        conn = self._repo.project_manager.connection
+        try:
+            conn.execute(
+                f'ALTER TABLE "{table_name}" '
+                f'ADD COLUMN "{score_column}" REAL DEFAULT 0'
+            )
+        except Exception:
+            pass  # column already exists
+
+        conn.execute(f"""
+            UPDATE "{table_name}"
+            SET "{score_column}" = {weight} * (
+                COALESCE(ST_Area(geom), 0) /
+                NULLIF(
+                    (SELECT SUM(COALESCE(ST_Area(geom), 0))
+                     FROM "{table_name}"),
+                    0
+                )
+            )
+        """)
+        conn.commit()
+
+    # ------------------------------------------------------------------ #
     #  Version history
     # ------------------------------------------------------------------ #
 
     def get_versions(self, scenario_name):
-        """Return all versions for a scenario, newest first.
-
-        Args:
-            scenario_name: str — base scenario name (without version suffix)
-
-        Returns:
-            list[dict]: each dict has id, scenario_name, table_name,
-                        description, parent_version_id, is_current, created_at
-        """
+        """Return all versions for a scenario, newest first."""
         base_sanitized = self._repo.sanitize_name(scenario_name)
         return self._repo.get_versions(base_sanitized)
 
     def get_version_by_id(self, version_id):
-        """Return a single version dict by id, or None.
-
-        Args:
-            version_id: int — spatial_versions.id
-
-        Returns:
-            dict or None: version row as dict, or None if not found
-        """
+        """Return a single version dict by id, or None."""
         return self._repo.get_version_by_id(version_id)
 
     def load_version(self, version_id, display_name, group_name=None):
-        """Load an existing versioned table as a QGIS layer (no HEAD move).
-
-        Useful for side-by-side comparison — loads the table without
-        changing is_current.
-
-        Args:
-            version_id:   int — spatial_versions.id
-            display_name: str — QGIS layer display name
-            group_name:   str or None — QGIS layer tree group
-
-        Returns:
-            QgsVectorLayer — the loaded layer
-
-        Raises:
-            ValueError: if version_id not found in spatial_versions.
-        """
+        """Load an existing versioned table as a QGIS layer (no HEAD move)."""
         version = self._repo.get_version_by_id(version_id)
         if version is None:
             raise ValueError(f"Version {version_id} not found in spatial_versions.")
         return self._ops.create_qgis_layer(version['table_name'], display_name, group_name)
 
     def rollback_to_version(self, scenario_name, version_id, group_name=None):
-        """Restore HEAD to a previous version — O(1), no spatial recalculation.
-
-        Moves the `is_current` pointer in `spatial_versions` to `version_id`
-        and loads the corresponding SpatiaLite table as a QGIS layer.
-
-        Args:
-            scenario_name: str — base scenario name (without version suffix)
-            version_id:    int — id in spatial_versions to restore
-            group_name:    str or None — QGIS layer tree group for the layer
-
-        Returns:
-            dict: {table, version_id, layer}
-
-        Raises:
-            ValueError: if version_id does not exist in spatial_versions.
-        """
+        """Restore HEAD to a previous version — O(1), no spatial recalculation."""
         version = self._repo.get_version_by_id(version_id)
         if version is None:
             raise ValueError(f"Version {version_id} not found in spatial_versions.")

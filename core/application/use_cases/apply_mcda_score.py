@@ -58,28 +58,7 @@ class ApplyMcdaScore:
             raise ValueError("Project database path not found.")
 
         with self._engine_cls(project_db_path) as engine:
-            conn = engine._repo.project_manager.connection
-
-            try:
-                conn.execute(
-                    f'ALTER TABLE "{cmd.table_name}" '
-                    f'ADD COLUMN "{score_column}" REAL DEFAULT 0'
-                )
-            except Exception:
-                pass  # column already exists
-
-            conn.execute(f"""
-                UPDATE "{cmd.table_name}"
-                SET "{score_column}" = {matched_weight} * (
-                    COALESCE(ST_Area(geom), 0) /
-                    NULLIF(
-                        (SELECT SUM(COALESCE(ST_Area(geom), 0))
-                         FROM "{cmd.table_name}"),
-                        0
-                    )
-                )
-            """)
-            conn.commit()
+            engine.score_table(cmd.table_name, score_column, matched_weight)
 
         # Refresh any QGIS layer currently displaying this table
         try:

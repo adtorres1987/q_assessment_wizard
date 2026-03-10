@@ -45,7 +45,7 @@ class AssessmentExecutor:
             admin_manager: AdminManager — satisfies MetadataRepositoryPort
             project_db_id: int  — project PK in admin.sqlite
         """
-        from .core.spatial_engine import SpatialEngine
+        from .core.infrastructure.spatial import SpatialEngine
 
         self.project_id    = project_id
         self.project_db_id = project_db_id

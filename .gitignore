@@ -6,3 +6,4 @@ projects/
 .DS_Store
 *.sqlite
 admin.sqlite
+CONTEXT.md

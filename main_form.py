@@ -81,7 +81,6 @@ class AssessmentMainForm(QWidget):
         self._detail_stack.setMaximumHeight(200)
 
         self._assessment_panel = AssessmentDetailPanel()
-        self._assessment_panel.rebuild_clicked.connect(self._on_run_analysis)
         self._assessment_panel.weights_edit_clicked.connect(self._on_edit_weights)
         self._detail_stack.addWidget(self._assessment_panel)   # index 0
 
@@ -340,10 +339,6 @@ class AssessmentMainForm(QWidget):
                 act = menu.addAction("🗑 Delete Project…")
                 act.triggered.connect(lambda checked, i=item: self._on_delete_project(i))
             elif node_type == 'assessment':
-                act = menu.addAction("🔄 Rebuild Assessment")
-                act.triggered.connect(lambda checked, i=item: self._on_new_version(i))
-                act = menu.addAction("✏ Rename…")
-                act.triggered.connect(lambda checked, i=item: self._on_rename_assessment(i))
                 menu.addSeparator()
                 act = menu.addAction("🗑 Delete Assessment…")
                 act.triggered.connect(lambda checked, i=item: self._on_delete_assessment(i))
@@ -419,22 +414,6 @@ class AssessmentMainForm(QWidget):
         if reply == QMessageBox.Yes:
             self.admin_manager.delete_assessment(assessment_id)
             self._populate_tree()
-
-    def _on_rename_assessment(self, item):
-        """Rename an assessment via QInputDialog."""
-        assessment_name = item.data(0, ROLE_NAME) or item.text(0)
-        assessment_id = item.data(0, ROLE_ID)
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Assessment",
-            f"New name for '{assessment_name}':",
-            text=assessment_name
-        )
-        if ok and new_name.strip() and new_name.strip() != assessment_name:
-            try:
-                self.admin_manager.rename_assessment(assessment_id, new_name.strip())
-                self._populate_tree()
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Could not rename:\n{str(e)}")
 
     def _on_toggle_analysis_visibility(self, item):
         """Toggle the visibility checkbox of an analysis node."""

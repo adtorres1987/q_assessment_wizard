@@ -78,7 +78,7 @@ class VersionHistoryPanel(QGroupBox):
         self._list.clear()
 
         try:
-            from ...core.spatial_engine import SpatialEngine
+            from ...core.infrastructure.spatial import SpatialEngine
             with SpatialEngine(db_path) as engine:
                 versions = engine.get_versions(scenario_name)
         except Exception as e:
