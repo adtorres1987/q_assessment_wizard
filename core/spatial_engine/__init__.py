@@ -3,11 +3,9 @@
 Spatial Engine package — facade for all SpatiaLite spatial operations.
 
 Public API:
-    SpatialEngine     — main entry point (context manager)
-    OverlayOperation  — enum for operation types
+    SpatialEngine — main entry point (context manager)
 """
 
 from .engine import SpatialEngine
-from .operations import OverlayOperation
 
-__all__ = ["SpatialEngine", "OverlayOperation"]
+__all__ = ["SpatialEngine"]

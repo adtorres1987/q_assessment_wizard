@@ -2,10 +2,6 @@
 """
 SpatialEngine — main facade for all spatial operations in the plugin.
 
-Phase 1: encapsulates ProjectManager + SpatialAnalyzerLite behind a clean API.
-Phase 3: overlay() creates immutable versioned tables. Rollback = HEAD pointer move.
-Phase 4: added get_version_by_id() and load_version() for CompareVersions use case.
-
 Versioning model:
   - Each overlay run creates a NEW table: {base_name}__v{n}  (n = 1, 2, 3, ...)
   - The active result is tracked by `spatial_versions.is_current = 1` in the
@@ -19,7 +15,7 @@ Clean Architecture position:
 """
 
 from .repository import SpatialRepository
-from .operations import OperationRunner, OverlayOperation
+from .operations import OperationRunner
 
 
 class SpatialEngine:
@@ -27,23 +23,12 @@ class SpatialEngine:
 
     Usage (context manager — preferred):
         with SpatialEngine(db_path) as engine:
-            target_table      = engine.prepare_layer(target_layer)
-            assessment_table  = engine.prepare_layer(assessment_layer)
-
-            result = engine.overlay(target_table, assessment_table,
-                                    "project__assessment",
-                                    group_name="Output Layers")
-            # result == {
-            #   'table': 'project__assessment__v1',  ← versioned table
-            #   'version_id': 1,
-            #   'layer': QgsVectorLayer,
-            # }
-
-            # On re-run (same scenario):
-            result2 = engine.overlay(...)
-            # result2['table'] == 'project__assessment__v2'
-
-            # Rollback to v1:
+            target_table = engine.prepare_layer(target_layer)
+            result = engine.cumulative_overlay(
+                target_table, [assessment_table],
+                "project__assessment",
+                group_name="Output Layers"
+            )
             engine.rollback_to_version("project__assessment", version_id=1)
 
     Usage (manual lifecycle):
@@ -106,95 +91,80 @@ class SpatialEngine:
         """
         return self._repo.ensure_layer(qgs_layer)
 
+    def sanitize_name(self, raw_name: str) -> str:
+        """Return a SpatiaLite-safe table name from any string."""
+        return self._repo.sanitize_name(raw_name)
+
+    def drop_table(self, table_name: str):
+        """Drop a table from SpatiaLite."""
+        self._repo.drop_table(table_name)
+
     # ------------------------------------------------------------------ #
-    #  Overlay analysis (Phase 3 — versioned)
+    #  Overlay analysis — cumulative versioned
     # ------------------------------------------------------------------ #
 
-    def overlay(self, target_table, assessment_table, output_name,
-                group_name=None, layer_display_name=None):
-        """Run the full overlay pipeline and create an immutable versioned table.
+    def cumulative_overlay(self, target_table, assessment_tables, output_name,
+                           group_name=None, layer_display_name=None):
+        """Run cumulative overlay: apply each assessment layer iteratively.
 
-        Each call creates a NEW table `{output_name}__v{n}` — previous versions
-        are never overwritten. The new version becomes HEAD.
+        Each step intersects the previous result with one assessment layer,
+        keeping non-intersecting features as 'no_overlap'.
 
-        Steps:
-          1. Count existing versions → determine n
-          2. Compute versioned table name: {sanitized_output_name}__v{n}
-          3. Run intersection → tmp_intersect (SpatiaLite only, no QGIS)
-          4. Run union        → tmp_union     (SpatiaLite only, no QGIS)
-          5. Rename tmp_union → final versioned table
-          6. Drop tmp_intersect
-          7. Record version in spatial_versions (HEAD = new version)
-          8. Load final table as a QGIS layer
+        Step 1: target ∩ assessment[0]          → _step_0_tmp
+        Step 2: _step_0_tmp ∩ assessment[1]     → _step_1_tmp
+        ...
+        Last:   _step_{n-2} ∩ assessment[n-1]   → {base}__v{m}
 
         Args:
-            target_table:       str — sanitized source table name in SpatiaLite
-            assessment_table:   str — sanitized overlay table name in SpatiaLite
+            target_table:       str — sanitized source table in SpatiaLite
+            assessment_tables:  list[str] — ordered assessment tables to apply
             output_name:        str — base name (e.g. "project__assessment")
-                                      Version suffix is appended automatically.
-            group_name:         str or None — QGIS layer tree group path for the
-                                result. Supports nested paths via '/' separator
-                                (e.g. "01_School/v2_result").
-            layer_display_name: str or None — display name shown in QGIS layer
-                                panel. Defaults to output_name when None.
+            group_name:         str or None — QGIS layer tree group
+            layer_display_name: str or None — display name in QGIS
 
         Returns:
-            dict: {
-                'table':      str            — versioned SpatiaLite table name,
-                'version_id': int            — id in spatial_versions,
-                'layer':      QgsVectorLayer — loaded QGIS layer,
-            }
+            dict: {table, version_id, layer}
         """
         base_sanitized = self._repo.sanitize_name(output_name)
+        existing = self._repo.get_versions(base_sanitized)
+        version_num = len(existing) + 1
+        final_table = f"{base_sanitized}__v{version_num}"
 
-        # Determine version number from existing history
-        existing_versions = self._repo.get_versions(base_sanitized)
-        version_num = len(existing_versions) + 1
-        versioned_name = f"{base_sanitized}__v{version_num}"
+        temp_tables = []
+        prev_table = target_table
+        is_first_step = True
 
-        tmp_intersect = f"{versioned_name}_tmp_intersect"
-        tmp_union     = f"{versioned_name}_tmp_union"
-        final_table   = versioned_name  # already sanitized via base_sanitized
+        for i, assessment_table in enumerate(assessment_tables):
+            is_last = (i == len(assessment_tables) - 1)
+            step_table = final_table if is_last else \
+                f"{base_sanitized}__step_{i}_tmp"
+            if not is_last:
+                temp_tables.append(step_table)
 
-        # Step 1 — Intersection (intermediate only)
-        self._ops.execute(
-            target_table, assessment_table, tmp_intersect,
-            operation=OverlayOperation.INTERSECT
-        )
+            self._ops.cumulative_step(
+                prev_table, assessment_table, step_table, is_first_step
+            )
+            prev_table = step_table
+            is_first_step = False
 
-        # Step 2 — Union (intermediate only)
-        self._ops.execute(
-            target_table, assessment_table, tmp_union,
-            operation=OverlayOperation.UNION
-        )
+        for t in temp_tables:
+            self._repo.drop_table(t)
 
-        # Step 3 — Promote union as the final versioned table
-        self._repo.rename_table(tmp_union, final_table)
-
-        # Step 4 — Remove intermediate intersection
-        self._repo.drop_table(tmp_intersect)
-
-        # Step 5 — Record in spatial_versions (new HEAD)
-        parent_id = existing_versions[0]['id'] if existing_versions else None
+        parent_id = existing[0]['id'] if existing else None
         version_id = self._repo.create_version(
             scenario_name=base_sanitized,
             table_name=final_table,
-            description=f"Version {version_num}",
+            description=f"Version {version_num} (cumulative)",
             parent_version_id=parent_id,
         )
 
-        # Step 6 — Load as QGIS layer
         display_name = layer_display_name or output_name
         layer = self._ops.create_qgis_layer(final_table, display_name, group_name)
 
-        return {
-            'table': final_table,
-            'version_id': version_id,
-            'layer': layer,
-        }
+        return {'table': final_table, 'version_id': version_id, 'layer': layer}
 
     # ------------------------------------------------------------------ #
-    #  Version history (Phase 3)
+    #  Version history
     # ------------------------------------------------------------------ #
 
     def get_versions(self, scenario_name):
@@ -209,15 +179,6 @@ class SpatialEngine:
         """
         base_sanitized = self._repo.sanitize_name(scenario_name)
         return self._repo.get_versions(base_sanitized)
-
-    def get_current_version(self, scenario_name):
-        """Return the HEAD version dict for a scenario, or None.
-
-        Args:
-            scenario_name: str — base scenario name (without version suffix)
-        """
-        base_sanitized = self._repo.sanitize_name(scenario_name)
-        return self._repo.get_current_version(base_sanitized)
 
     def get_version_by_id(self, version_id):
         """Return a single version dict by id, or None.
@@ -264,11 +225,7 @@ class SpatialEngine:
             group_name:    str or None — QGIS layer tree group for the layer
 
         Returns:
-            dict: {
-                'table':      str            — restored table name,
-                'version_id': int            — same as input version_id,
-                'layer':      QgsVectorLayer — loaded QGIS layer,
-            }
+            dict: {table, version_id, layer}
 
         Raises:
             ValueError: if version_id does not exist in spatial_versions.
@@ -278,11 +235,8 @@ class SpatialEngine:
             raise ValueError(f"Version {version_id} not found in spatial_versions.")
 
         base_sanitized = self._repo.sanitize_name(scenario_name)
-
-        # Move HEAD pointer (no spatial recalculation)
         self._repo.set_current_version(base_sanitized, version_id)
 
-        # Load the historical table as a QGIS layer
         layer = self._ops.create_qgis_layer(
             version['table_name'], scenario_name, group_name
         )

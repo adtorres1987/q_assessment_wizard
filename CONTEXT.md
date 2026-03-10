@@ -1,240 +1,353 @@
-# Assessment Wizard — Project Context
+# Assessment Wizard — Documento de Contexto
 
-**Last updated:** 2026-02-25
-**Plugin:** QGIS 3 Python plugin (PyQGIS + SpatiaLite)
-**Repo:** https://github.com/adtorres1987/q_assessment_wizard
-**Detailed reference:** `architecture.md` · `docs/sql_schemas.md` · `EMDS8_ADAPTATION_NOTES.md`
+> Generado: 2026-03-07
+> Plugin QGIS 3 — Python 3.9 / PyQt5 / SpatiaLite
 
 ---
 
-## What This Plugin Does
+## 1. Propósito del Plugin
 
-A QGIS wizard that lets field ecologists run **spatial overlay assessments** (intersection + union) on vector layers, track results with **Git-like immutable versioning**, and navigate project history via a tree view. Based on the EMDS 3 model (Steve): Project → Assessment → Provenance → Work Close Steps.
+**Assessment Wizard** es un plugin de QGIS que permite crear, ejecutar y versionar *assessments* (evaluaciones espaciales) sobre capas vectoriales. El flujo principal es:
+
+1. El usuario agrupa capas base en un grupo QGIS llamado `Base Layers`.
+2. Define un *assessment*: selecciona una capa **Target** y una o más capas de **evaluación**.
+3. El plugin realiza un análisis espacial (intersección + unión) y guarda el resultado como tabla SpatiaLite versionada.
+4. Los pesos MCDA se pueden ajustar para ponderar el área de cada capa en la puntuación final.
+5. Cada re-ejecución crea una nueva versión inmutable (`v1`, `v2`, `v3`, …).
 
 ---
 
-## Architecture at a Glance
+## 2. Arquitectura General (Clean Architecture)
 
 ```
-UI Layer          main_form.py · assessment_wizard_dialog.py
-     ↓
-Facade Layer      assessment_executor.py  (Commands → Use Cases, QMessageBox on error)
-     ↓
-Application       core/application/use_cases/  (business logic, no QGIS imports)
-     ↓
-Domain            core/domain/models/  (pure Python, zero framework imports)
-     ↓
-Infrastructure    SpatialEngine · AdminManager · ProjectManager
+UI Layer
+  assessment_wizard_dialog.py   ← Wizard de 3 páginas (QWizard)
+  main_form.py                  ← Panel dock principal (QDockWidget content)
+  ui/panels/
+    emds_tree_model.py          ← Árbol EMDS (Project → Base Layers | Assessments)
+    assessment_detail_panel.py  ← Tarjeta de resumen del assessment
+    analysis_detail_panel.py    ← Panel MCDA + WeightsEditDialog
+
+Application Layer (Façade)
+  assessment_executor.py        ← Traduce eventos UI → comandos de use case
+
+Use Cases (core/application/use_cases/)
+  commands.py                   ← DTOs: CreateScenarioCommand, ApplyOverlayCommand,
+                                         RollbackVersionCommand, CompareVersionsCommand
+  create_scenario.py            ← Assessment simple (solo features seleccionadas)
+  apply_overlay.py              ← Overlay espacial versionado
+  rollback_version.py           ← Restaurar versión anterior
+  compare_versions.py           ← Cargar dos versiones para comparar
+
+Infrastructure
+  admin_manager.py              ← CRUD metadata (admin.sqlite)
+  project_manager.py            ← Gestión SpatiaLite por proyecto
+  layer_migration.py            ← Migración de capas QGIS → SpatiaLite
+  core/spatial_engine/
+    engine.py                   ← SpatialEngine (façade)
+    repository.py               ← SpatialRepository (SQL directo)
+    operations.py               ← OperationRunner, OverlayOperation
 ```
 
-**Two databases:**
-- `admin.sqlite` — central metadata (projects, assessments, provenance, tasks, analyses, weights)
-- `projects/{name}.sqlite` — per-project SpatiaLite (layers, versioned spatial tables)
+### Flujo de llamadas
 
-**Table naming convention:** `{project_id}__{assessment_name}__v{n}`
-Double underscore `__` is the separator; `sanitize_table_name()` preserves it.
-
----
-
-## Implementation Status
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | SpatialEngine facade, decouple UI from SQL | ✅ Done |
-| 2 | Domain models: Project, Scenario, SpatialVersion | ✅ Done |
-| 3 | Immutable versioning (spatial_versions + HEAD pointer) | ✅ Done |
-| 4 | Use cases: CreateScenario, ApplyOverlay, RollbackVersion | ✅ Done |
-| 5 | UI redesign: flat tree + detail panels + weight history | ✅ Done |
-
-**Recently added (2026-02-25):**
-- Flat EMDS tree: Project → Base Layers + Assessments → ⚙ Weights + 🔁 Analysis v{n}
-- Removed Compare and Settings buttons (not implemented)
-- QGIS layer groups: all versions of an assessment stay in one flat group (no subgroup for v2+)
-- Provenance naming: `name="Run v{n}"`, `description="Base spatial analysis: union + intersection"`
-- Weight history via `snapshot_analysis_for_version()` — immutable `v{n}` rows in `analyses`
-- Multi-layer overlay: assessment inputs merged via UNION ALL → single output table
-- New schema tables: `analyses`, `assessment_criteria`, `analysis_weights`, `analysis_results`
-- `_drop_unused_tables()` removes `spatial_references`, `analysis_comparisons`, `workflow_steps`, `analysis_configurations`
+```
+UI → AssessmentExecutor → Use Case → SpatialEngine → SpatialRepository
+                                   → AdminManager
+```
 
 ---
 
-## Key Files
+## 3. Bases de Datos
 
-| File | Responsibility |
-|------|---------------|
-| `assessment_wizard.py` | Plugin lifecycle, toolbar, `run()` |
-| `main_form.py` | Tree view, stacked detail panel, CRUD actions |
-| `assessment_wizard_dialog.py` | 3-page wizard UI (name → layers → map selection) |
-| `assessment_executor.py` | Thin facade: builds Commands, catches errors, shows QMessageBox |
-| `admin_manager.py` | All admin.sqlite CRUD (projects, assessments, provenance, analyses, weights, etc.) |
-| `project_manager.py` | SpatiaLite CRUD: layer migration, spatial_versions table, sanitize_table_name |
-| `core/spatial_engine/engine.py` | `SpatialEngine` public API: `prepare_layer()`, `overlay()`, `rollback_to_version()`, `get_versions()` |
-| `core/application/use_cases/apply_overlay.py` | Versioned spatial overlay use case (wizard path) |
-| `core/application/use_cases/commands.py` | Input DTOs for all use cases |
-| `ui/panels/emds_tree_model.py` | `EMDSTreeModel.populate_tree()` — builds the EMDS tree |
-| `ui/panels/assessment_detail_panel.py` | Assessment card: target layer, input layers, weights, Edit Weights button |
-| `ui/panels/analysis_detail_panel.py` | Analysis card: output table, run date, snapshot weights; `WeightsEditDialog` |
-| `ui/panels/version_history_panel.py` | Version history panel (reserved for future use) |
+### 3.1 `admin.sqlite` (metadata global)
+
+Tablas activas:
+
+| Tabla | Propósito |
+|---|---|
+| `projects` | Registro de proyectos (id, name, db_path) |
+| `assessments` | Assessments por proyecto |
+| `assessment_layers` | Capas input/output por assessment |
+| `layer_visibility_state` | Estado de visibilidad persistido |
+| `analyses` | Configuración MCDA (`name='Default'` mutable; `name='v{n}'` inmutable) |
+| `analysis_weights` | Pesos por capa en cada configuración |
+| `analysis_results` | Resultados MCDA registrados |
+| `provenance` | Registro de ejecuciones (runs) |
+| `task_details` | Pasos/operaciones de cada run |
+| `app_settings` | Configuración global del plugin |
+| `assessment_criteria` | Criterios de evaluación |
+
+### 3.2 `projects/{project_name}.sqlite` (SpatiaLite por proyecto)
+
+- Contiene las capas migradas y los resultados del overlay.
+- Tabla `spatial_versions`: historial de versiones HEAD.
+- Cada overlay genera una tabla `{project}__{assessment}__v{n}`.
 
 ---
 
-## Tree Structure
+## 4. Convenciones de Nombres
+
+| Elemento | Patrón |
+|---|---|
+| Base name de overlay | `{project_name}__{assessment_name}` |
+| Tabla versionada | `{project_name}__{assessment_name}__v{n}` |
+| Separador | `__` (doble guion bajo) |
+| Sanitización | `sanitize_table_name()` → `re.sub(r'_{3,}', '__', ...)` |
+| Grupo QGIS assessment | `{seq:02d}_{assessment_name}` |
+| Display name primer run | `OUTPUT_{assessment_name}` |
+| Display name re-run | `Result_v{n}` |
+
+---
+
+## 5. Ciclo de Vida de un Assessment
+
+### 5.1 Primera ejecución (`v1`)
+
+```
+QassessmentWizardDialog.accept()
+  → AssessmentExecutor.execute_spatial_assessment()
+      → ApplyOverlay.execute(ApplyOverlayCommand)
+          → SpatialEngine.prepare_layer()     # migra capas a SpatiaLite
+          → [merge multi-layer → _merged_{name}]
+          → SpatialEngine.overlay()            # genera tabla __v1
+              → OverlayOperation.INTERSECT
+              → OverlayOperation.UNION
+              → rename tmp → final table
+              → spatial_versions INSERT (HEAD)
+              → load QGIS layer
+  → AssessmentExecutor.record_assessment()
+      → AdminManager.create_assessment()
+      → AdminManager.create_provenance()
+      → AdminManager.add_task()
+      → AdminManager.create_analysis_config()  # pesos iguales por defecto
+      → AdminManager.snapshot_analysis_for_version()
+```
+
+### 5.2 Nueva versión (`v2`, `v3`, …)
+
+```
+AssessmentMainForm._on_new_version()
+  → AssessmentExecutor.rerun_spatial_assessment()
+      → SpatialEngine.overlay()  # genera __v{n+1}
+  → AdminManager.add_assessment_layer()
+  → AdminManager.snapshot_analysis_for_version()
+```
+
+### 5.3 MCDA Score
+
+```
+AnalysisDetailPanel._on_run_again()
+  → AssessmentMainForm._on_run_mcda()
+      → AssessmentExecutor.apply_mcda_score()
+          → AdminManager.get_analysis_config()
+          → UPDATE table SET MCDA_SCORE = weight * (ST_Area(geom) / SUM(ST_Area(geom)))
+```
+
+---
+
+## 6. Archivos Clave
+
+### Entrada del plugin
+
+| Archivo | Rol |
+|---|---|
+| `__init__.py` | Entry point QGIS |
+| `assessment_wizard.py` | Plugin class, crea el dock |
+| `main_form.py` | Contenido del dock (panel principal) |
+| `assessment_wizard_dialog.py` | Wizard de 3 páginas |
+
+### Lógica de negocio
+
+| Archivo | Rol |
+|---|---|
+| `admin_manager.py` | Todo el CRUD de metadata |
+| `assessment_executor.py` | Façade UI → use cases |
+| `core/application/use_cases/apply_overlay.py` | Overlay espacial |
+| `core/application/use_cases/commands.py` | DTOs de comandos |
+| `core/spatial_engine/engine.py` | SpatialEngine façade |
+| `core/spatial_engine/repository.py` | SQL directo SpatiaLite |
+| `core/spatial_engine/operations.py` | Operaciones de overlay |
+| `layer_migration.py` | Migración QGIS → SpatiaLite |
+| `project_manager.py` | Gestión conexión SpatiaLite |
+
+### UI
+
+| Archivo | Rol |
+|---|---|
+| `ui/panels/emds_tree_model.py` | Árbol Project Explorer |
+| `ui/panels/analysis_detail_panel.py` | Panel MCDA + WeightsEditDialog |
+| `ui/panels/assessment_detail_panel.py` | Tarjeta resumen assessment |
+| `ui/panels/version_history_panel.py` | Historial de versiones |
+| `map_tools.py` | FeatureSelectionTool, RectangleSelectTool |
+| `geometry_utils.py` | transform_extent_to_canvas_crs, get_assessment_summary |
+
+---
+
+## 7. Árbol EMDS (UI)
 
 ```
 📁 Project
-├── 📁 Base Layers
-│    └── {layer_name}
-├── 📁 Assessment A
-│    ├── ⚙ Weights           (type='weights', ROLE_ID=assessment_id)
-│    │    └── layer: pct%
-│    ├── 🔁 Analysis v1      (type='analysis', checkable)
-│    └── 🔁 Analysis v2
-└── 📁 Assessment B
-     ├── ⚙ Weights
-     └── 🔁 Analysis v1
+  ├── 📁 Base Layers         (inmutable, solo lectura)
+  │     ├── 🔴 Layer A
+  │     └── 🟩 Layer B
+  └── 🟢 📁 Assessment Name  (status: 🟢=ok, 🟡=sin output, 🔴=target no encontrado)
+        ├── ⚙ Weights
+        │     ├── LayerA: 50%
+        │     └── LayerB: 50%
+        ├── 🔁 Analysis v1   [checkbox visibilidad]
+        └── 🔁 Analysis v2   [checkbox visibilidad]
 ```
 
-**Node types:** `project`, `base_layers_group`, `base_layer`, `assessment`, `weights`, `analysis`
+**Roles de datos del árbol:**
 
-**Detail panel routing (QStackedWidget):**
-
-| Selected node | Stack index | Panel |
+| Constante | Qt Role | Contenido |
 |---|---|---|
-| `assessment`, `weights` | 0 | `AssessmentDetailPanel` |
-| `project`, `base_layers_group`, `base_layer` | 1 | plain text |
-| `analysis` | 2 | `AnalysisDetailPanel` |
+| `ROLE_ID` | UserRole | PK del nodo |
+| `ROLE_TYPE` | UserRole+1 | `'project'`, `'assessment'`, `'analysis'`, `'weights'`, `'base_layers_group'` |
+| `ROLE_OUTPUT_TABLES` | UserRole+2 | `list[str]` — tablas de salida |
+| `ROLE_SCENARIO_NAME` | UserRole+3 | Base name sin `__v{n}` |
+| `ROLE_NAME` | UserRole+4 | Nombre raw (sin display text) |
 
 ---
 
-## Versioning Model (Git-like)
+## 8. Wizard de 3 Páginas
 
-```
-base_name = "proj__erosion"           ← base table name
-v1: spatial_versions row, is_current=0  → table proj__erosion__v1
-v2: spatial_versions row, is_current=1  → table proj__erosion__v2  ← HEAD
-```
+**Página 1 — Configuración:**
+- `lineEdit_name` — nombre del assessment (spaces → `_`)
+- `tableWidget_layers` — capas del grupo "Base Layers"
+- Cada capa tiene un combo: `Do not include` / `Include in assessment` / `Include as Target` / `Spatial Marker`
+- Solo una capa puede ser Target
+- Al salir del campo nombre, detecta duplicados y ofrece crear `v2+`
 
-- **Rollback** = O(1) UPDATE on `is_current` — no spatial recalculation
-- **New version** = `engine.overlay()` auto-increments via `len(get_versions(base_name)) + 1`
-- Single base name per assessment regardless of number of input layers (multi-layer inputs are merged)
+**Página 2 — Selección de features:**
+- Mapa interactivo con OSM como basemap
+- Tools: Zoom In/Out, Pan, Rectangle Select, Feature Click Select
+- Validación: ≥1 feature seleccionada
 
----
-
-## New Version Flow (Wizard — Option B)
-
-```
-User types existing assessment name in wizard
-  → editingFinished → _on_name_editing_finished()
-    → Detects duplicate immediately
-    → QMessageBox: "Create new version (v2+)?"
-      → Yes: _creating_new_version=True
-             populate_layers() + _add_output_layers_to_table()
-             Table shows: Base Layers (white) + Output Layers (light blue)
-      → No:  clear name field, set focus
-
-User configures layers → Finish → accept()
-  → Skips name uniqueness check (allow_rerun=True)
-  → execute_spatial_assessment(..., allow_rerun=True)
-    → ApplyOverlay._validate() skips name check
-    → engine.overlay() creates __v{n+1}
-  → record_new_version(existing_assessment_id, results)
-    → Adds output layers to existing assessment (no new assessment record)
-    → Records provenance (name="Run v{n}") + task_details
-    → snapshot_analysis_for_version() captures weights for this run
-```
-
-Also available via context menu: right-click assessment → "New Version" → `rerun_spatial_assessment()` (re-runs with same stored layers, no wizard).
+**Página 3 — Resumen:**
+- Tabla resumen de capas, mapa de features seleccionadas
+- Al aceptar → ejecuta el assessment
 
 ---
 
-## Wizard Layer Selection Rules
+## 9. MCDA (Multi-Criteria Decision Analysis)
 
-- **Normal flow (v1):** table shows only "Base Layers" QGIS group
-- **New version (v2+):** table also shows "Output Layers" group (light blue background)
-- Target layer: defines spatial extent — one only, enforced by `on_status_changed()`
-- Assessment layers: overlay inputs — one or more (merged via UNION ALL if multiple)
+- Los pesos se guardan en `analyses` (tabla admin.sqlite) como JSON: `{"LayerA": 0.5, "LayerB": 0.5}`.
+- `Default` = pesos actuales mutables; `v{n}` = snapshot inmutable por versión.
+- Fórmula de puntuación aplicada por `apply_mcda_score()`:
 
----
+  ```sql
+  MCDA_SCORE = weight * (ST_Area(geom) / SUM(ST_Area(geom)))
+  ```
 
-## Weight History Pattern
-
-```
-analyses rows:
-  name='Default'  → mutable current config (user editable)
-  name='v1'       → immutable snapshot of weights used in run 1
-  name='v2'       → immutable snapshot of weights used in run 2
-```
-
-- `create_analysis_config()` — upserts the `Default` row
-- `snapshot_analysis_for_version(assessment_id, output_table, v_num)` — creates immutable `v{n}` row + `analysis_results` link
-- `get_analysis_for_output_table(output_table)` — returns snapshot row for a specific run
-- `AnalysisDetailPanel.load()` reads snapshot first, falls back to Default config
+- `WeightsEditDialog` valida que los pesos sumen exactamente 100%.
+- `AnalysisDetailPanel.load()` prefiere el snapshot de la versión; si no existe, usa `Default`.
 
 ---
 
-## AssessmentExecutor Constructor
+## 10. Versioning Espacial
 
+- Cada `engine.overlay()` crea una nueva tabla `{base}__v{n}` — **nunca sobreescribe**.
+- `spatial_versions` registra el historial con puntero `is_current` (HEAD).
+- Rollback = mover el puntero `is_current` → O(1), sin recalculo espacial.
+- `get_versions(base_name)` retorna versiones ordenadas de más reciente a más antigua.
+
+---
+
+## 11. Patrones y Reglas Importantes
+
+### Sanitización de nombres
 ```python
-AssessmentExecutor(project_id, admin_manager, project_db_id)
-# project_id    = project name string (used as prefix in table names)
-# project_db_id = integer PK in admin.sqlite projects table
+sanitize_table_name(name):
+    # spaces → _  |  non-alphanumeric → _  |  3+ underscores → __
+    re.sub(r'_{3,}', '__', ...)
+```
+Esto preserva el separador `__` del patrón de nombres.
+
+### Acceso a la conexión SpatiaLite
+```python
+engine._repo.project_manager.connection  # CORRECTO
+engine._repo._conn                        # INCORRECTO (privado)
 ```
 
----
-
-## Key Patterns
-
+### SpatiaLite — Geometría
 ```python
-# Context manager for SpatialEngine
-with SpatialEngine(db_path) as engine:
-    table = engine.prepare_layer(qgs_layer)
-    result = engine.overlay(target_table, assessment_table, base_name,
-                            group_name=assessment_group,
-                            layer_display_name=display_name)
+ST_Area(geom)      # CORRECTO
+ST_Area(geometry)  # INCORRECTO
+```
 
-# Command pattern
-cmd = ApplyOverlayCommand(
-    assessment_name=name, project_id=project_id,
-    target_layer=target, assessment_layers=layers,
-    allow_rerun=False,   # True for v2+
+### Registro de geometría tras CREATE TABLE AS
+```python
+cursor.execute(
+    f"SELECT RecoverGeometryColumn('{table}', 'geom', {srid}, 'MULTIPOLYGON', 'XY')"
 )
-result = ApplyOverlay(admin_manager).execute(cmd)
-
-# Sanitize table name (preserves __ separator)
-table = project_manager.sanitize_table_name("My Layer Name")
-# → "my_layer_name"  (never "my___layer_name")
-
-# QGIS layer group — flat (no subgroups for v2+)
-assessment_group = f"{seq:02d}_{assessment_name}"
 ```
 
----
+### Multi-layer merge
+Cuando hay más de una capa de evaluación, se fusionan en una tabla temporal antes del overlay:
+```python
+merged_temp = sanitize_name(f"_merged_{assessment_name}")
+union_sql = " UNION ALL ".join(f"SELECT geom FROM {t}" for t in assessment_tables)
+```
+Esto garantiza un único output por assessment (no uno por capa).
 
-## Known Issues / Limitations
-
-- No PostgreSQL backend yet (`db_type` and `db_connection_string` fields reserved)
-- No what-if scenario branching UI (`is_scenario` flag exists in `task_details`, no UI)
-- `rerun_spatial_assessment()` (context menu path) re-runs with stored layer names — if base data has changed in QGIS, changes are NOT picked up (wizard path re-migrates, context menu path does not)
-- `admin.sqlite` is not tracked by git (deleted from repo intentionally)
-
----
-
-## Pending / Next Steps
-
-- [ ] PostgreSQL backend activation
-- [ ] Soft-delete UI (restore deleted projects/assessments)
-- [ ] What-if scenario branching UI
-- [ ] Chained assessment DAG visualization
-- [ ] Display version label in wizard table for output layers (e.g. `erosion (v1) [Output]`)
+### showEvent en main_form
+`showEvent` siempre llama `_populate_tree()`. Primero reconecta si `connection is None`.
 
 ---
 
-## Development Notes
+## 12. Dependencias Externas
 
-- QGIS layers read **only** from "Base Layers" group (+ "Output Layers" in v2+ mode)
-- Output layers added to project-level QGIS group named `{seq:02d}_{assessment_name}` (flat, no nesting)
-- `SpatialAnalyzerLite.analyze_and_create_layer()` returns key `total_count` (not `total`)
-- `re.sub(r'_{3,}', '__', ...)` in `sanitize_table_name()` collapses 3+ underscores to 2
-- `engine._repo.project_manager.connection` (not `engine._repo._conn`) for direct SQL access
-- `ST_Area(geom)` not `ST_Area(geometry)` in SpatiaLite
-- After `CREATE TABLE AS`, must call `RecoverGeometryColumn()` to register geometry
+- **QGIS 3** + **PyQt5** — UI y acceso a capas
+- **SpatiaLite** — almacenamiento espacial por proyecto
+- **SQLite** — `admin.sqlite` (metadata)
+- Python stdlib: `sqlite3`, `json`, `re`, `os`, `uuid`
+
+---
+
+## 13. Tests
+
+Ubicados en `test/`:
+- `test_init.py` — carga del plugin
+- `test_qgis_environment.py` — entorno QGIS
+- `test_translations.py` — traducciones i18n
+- `test_assessment_wizard_dialog.py` — diálogo wizard
+- `test_resources.py` — recursos Qt
+
+Los tests requieren un entorno QGIS completo (no se ejecutan fuera de QGIS).
+
+---
+
+## 14. Estado Actual del Proyecto (2026-03-07)
+
+- Clean Architecture **completada** con capa de Ports (2026-03-07).
+- MCDA con pesos configurables y snapshots por versión.
+- Versioning inmutable con rollback O(1).
+- Árbol EMDS completamente funcional con persistencia de estado.
+
+### Ports (`core/application/ports/`)
+- `MetadataRepositoryPort` — Protocol que abstrae `AdminManager`
+- `SpatialEnginePort` — Protocol que abstrae `SpatialEngine`
+- `AdminManager` satisface `MetadataRepositoryPort` via structural typing (sin cambios al AdminManager)
+
+### Use cases completos
+| Use case | Archivo |
+|---|---|
+| `CreateScenario` | create_scenario.py |
+| `ApplyOverlay` | apply_overlay.py (usa `Scenario` domain model) |
+| `RollbackVersion` | rollback_version.py |
+| `CompareVersions` | compare_versions.py |
+| `RerunSpatialAssessment` | rerun_spatial_assessment.py |
+| `ApplyMcdaScore` | apply_mcda_score.py |
+| `RecordAssessment` | record_assessment.py (unifica first-run y re-run) |
+
+### `SpatialEngine` — métodos públicos añadidos (2026-03-07)
+- `merge_layers(tables, merged_name) -> str`
+- `sanitize_name(raw) -> str`
+- `drop_table(name)`
+
+### `AssessmentExecutor` — thin façade
+- Constructor instancia todos los use cases con DI
+- Métodos: build Command → call use case → QMessageBox
+- Sin lógica de negocio residual

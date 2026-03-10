@@ -5,59 +5,69 @@ OperationRunner — executes spatial SQL operations against a SpatialRepository.
 Wraps SpatialAnalyzerLite so that higher layers never import it directly.
 """
 
-from enum import Enum
-
-
-class OverlayOperation(Enum):
-    """Supported overlay operation types.
-
-    Values match the logical names used in task_details.operation field.
-    """
-    INTERSECT = "intersect"
-    UNION     = "union"
-    BOTH      = "both"
-
 
 class OperationRunner:
-    """Executes a single spatial operation against a SpatialRepository.
+    """Executes spatial operations against a SpatialRepository.
 
     The runner is always bound to an open repository — it should not be
     instantiated outside of SpatialEngine.
     """
 
-    # Mapping from OverlayOperation to SpatialAnalyzerLite OperationType
-    _OP_MAP = None  # lazily populated to avoid import at module load
-
     def __init__(self, repository):
         self._repo = repository
 
-    def execute(self, target_table, assessment_table, output_table,
-                operation=OverlayOperation.UNION):
-        """Run a spatial operation and write results to a SpatiaLite table.
+    def cumulative_step(self, prev_table, assessment_table, output_table,
+                        is_first_step=True):
+        """Execute one cumulative overlay step.
 
-        Args:
-            target_table: str — source table name
-            assessment_table: str — overlay table name
-            output_table: str — name for the result table
-            operation: OverlayOperation
+        Calls _build_cumulative_step_query, executes SQL, registers geometry.
 
         Returns:
-            int: number of rows written to output_table
+            int: row count written to output_table
         """
-        from ...spatial_analysis_spatialite import SpatialAnalyzerLite, OperationType
-
-        op_map = {
-            OverlayOperation.INTERSECT: OperationType.INTERSECT,
-            OverlayOperation.UNION:     OperationType.UNION,
-            OverlayOperation.BOTH:      OperationType.BOTH,
-        }
+        from ...spatial_analysis_spatialite import SpatialAnalyzerLite
         analyzer = SpatialAnalyzerLite(self._repo.project_manager)
-        result = analyzer.analyze_and_create_layer(
-            target_table, assessment_table, output_table,
-            operation_type=op_map[operation],
-            add_to_qgis=False
+        query = analyzer._build_cumulative_step_query(
+            prev_table, assessment_table, output_table, is_first_step
         )
-        return result.get('total_count', 0)
+        conn = self._repo.project_manager.connection
+
+        if self._repo.table_exists(output_table):
+            self._repo.drop_table(output_table)
+
+        conn.execute(query)
+        conn.commit()
+
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {output_table}")
+        count = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT srid FROM geometry_columns "
+            "WHERE f_table_name=? AND f_geometry_column='geom'",
+            (prev_table,)
+        )
+        row = cursor.fetchone()
+        srid = row[0] if row else 4326
+        cursor.close()
+
+        registered = False
+        for try_type in ['MULTIPOLYGON', 'POLYGON', 'GEOMETRY']:
+            try:
+                conn.execute(
+                    f"SELECT RecoverGeometryColumn("
+                    f"'{output_table}', 'geom', {srid}, '{try_type}', 'XY')"
+                )
+                conn.commit()
+                registered = True
+                break
+            except Exception:
+                continue
+        if not registered:
+            raise RuntimeError(
+                f"Could not register geometry for cumulative step '{output_table}'"
+            )
+        return count
 
     def create_qgis_layer(self, table_name, layer_name, group_name=None):
         """Load a SpatiaLite table as a QGIS vector layer and add it to the map.

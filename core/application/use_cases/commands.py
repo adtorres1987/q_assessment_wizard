@@ -96,3 +96,55 @@ class CompareVersionsCommand:
     version_id_b: int
     project_db_id: int
     group_name: str = "Comparison"
+
+
+@dataclass
+class RerunSpatialAssessmentCommand:
+    """Command for the RerunSpatialAssessment use case.
+
+    Re-executes the spatial overlay for an existing assessment using the
+    original input layers stored in admin.sqlite, producing version n+1.
+
+    Attributes:
+        assessment_id:  PK of the assessment in admin.sqlite.
+        project_id:     Project name prefix used for output layer naming.
+        project_db_id:  Project primary key in admin.sqlite.
+    """
+    assessment_id: int
+    project_id: str
+    project_db_id: int
+
+
+@dataclass
+class ApplyMcdaScoreCommand:
+    """Command for the ApplyMcdaScore use case.
+
+    Computes and persists a weighted area-proportional MCDA score column
+    in an existing SpatiaLite overlay table.
+
+    Attributes:
+        assessment_id:  PK of the assessment (source of weight config).
+        table_name:     SpatiaLite table to score (e.g. proj__assess__v2).
+        project_db_id:  Project primary key (used to locate the SpatiaLite DB).
+    """
+    assessment_id: int
+    table_name: str
+    project_db_id: int
+
+
+@dataclass
+class RecordAssessmentCommand:
+    """Command for the RecordAssessment use case.
+
+    Persists assessment metadata (output layers, provenance, MCDA config,
+    weight snapshot) in admin.sqlite after a spatial run completes.
+
+    Attributes:
+        wizard_results:         dict returned by ApplyOverlay or CreateScenario.
+        project_db_id:          Project primary key.
+        existing_assessment_id: If set, records a new version under an existing
+                                assessment instead of creating a new one.
+    """
+    wizard_results: dict
+    project_db_id: int
+    existing_assessment_id: Optional[int] = None

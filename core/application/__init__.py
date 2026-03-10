@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Application layer — use cases for the Assessment Wizard plugin.
+Application layer — use cases and ports for the Assessment Wizard plugin.
 
-Phase 4 of Clean Architecture refactoring.
-
-Each use case in this layer:
+Each use case:
   - Receives a Command dataclass (input DTO)
-  - Validates business rules
-  - Orchestrates domain objects and infrastructure (SpatialEngine, admin_manager)
+  - Validates business rules via MetadataRepositoryPort
+  - Orchestrates domain objects and infrastructure via SpatialEnginePort
   - Returns a plain dict result
   - Raises ValueError / RuntimeError on failure (NO QMessageBox)
-
-The UI / AssessmentExecutor catches exceptions and shows QMessageBox.
 
 Layer position:
     UI (dialog)
@@ -19,8 +15,8 @@ Layer position:
     AssessmentExecutor (thin facade — handles QMessageBox, creates commands)
       ↓ Command dataclasses
     Use Cases (this package)
-      ↓ domain objects + SpatialEngine
-    Infrastructure (SpatialEngine, ProjectManager, AdminManager)
+      ↓ Ports (MetadataRepositoryPort, SpatialEnginePort)
+    Infrastructure (AdminManager, SpatialEngine)
 """
 
 from .use_cases import (
@@ -28,10 +24,16 @@ from .use_cases import (
     ApplyOverlayCommand,
     RollbackVersionCommand,
     CompareVersionsCommand,
+    RerunSpatialAssessmentCommand,
+    ApplyMcdaScoreCommand,
+    RecordAssessmentCommand,
     CreateScenario,
     ApplyOverlay,
     RollbackVersion,
     CompareVersions,
+    RerunSpatialAssessment,
+    ApplyMcdaScore,
+    RecordAssessment,
 )
 
 __all__ = [
@@ -39,8 +41,14 @@ __all__ = [
     'ApplyOverlayCommand',
     'RollbackVersionCommand',
     'CompareVersionsCommand',
+    'RerunSpatialAssessmentCommand',
+    'ApplyMcdaScoreCommand',
+    'RecordAssessmentCommand',
     'CreateScenario',
     'ApplyOverlay',
     'RollbackVersion',
     'CompareVersions',
+    'RerunSpatialAssessment',
+    'ApplyMcdaScore',
+    'RecordAssessment',
 ]

@@ -14,8 +14,7 @@ Raises:
   - ValueError: if name is a duplicate or no features are selected.
 """
 
-from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
-
+from ..ports import MetadataRepositoryPort
 from .commands import CreateScenarioCommand
 
 OUTPUT_GROUP_NAME = "Output Layers"
@@ -28,12 +27,12 @@ class CreateScenario:
     only in the current QGIS session.
 
     Args:
-        admin_manager: AdminManager instance (optional — if None, name
-                       uniqueness validation is skipped).
+        metadata_repo: MetadataRepositoryPort implementation (optional — if
+                       None, name uniqueness validation is skipped).
     """
 
-    def __init__(self, admin_manager=None):
-        self._admin_manager = admin_manager
+    def __init__(self, metadata_repo: MetadataRepositoryPort = None):
+        self._meta = metadata_repo
 
     def execute(self, cmd: CreateScenarioCommand,
                 group_name: str = OUTPUT_GROUP_NAME) -> dict:
@@ -72,8 +71,8 @@ class CreateScenario:
     # ------------------------------------------------------------------ #
 
     def _validate_unique_name(self, assessment_name, project_db_id):
-        if self._admin_manager and project_db_id is not None:
-            if self._admin_manager.assessment_name_exists(project_db_id, assessment_name):
+        if self._meta and project_db_id is not None:
+            if self._meta.assessment_name_exists(project_db_id, assessment_name):
                 raise ValueError(
                     f"Assessment name '{assessment_name}' already exists "
                     f"in this project."
@@ -88,6 +87,7 @@ class CreateScenario:
             )
 
     def _build_memory_layer(self, target_layer, layer_name):
+        from qgis.core import QgsVectorLayer, QgsWkbTypes
         selected = list(target_layer.selectedFeatures())
         geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
         crs = target_layer.crs().authid()
@@ -103,6 +103,7 @@ class CreateScenario:
         return memory_layer
 
     def _add_to_qgis(self, layer, group_name):
+        from qgis.core import QgsProject
         root = QgsProject.instance().layerTreeRoot()
         group = root.findGroup(group_name) or root.addGroup(group_name)
         QgsProject.instance().addMapLayer(layer, False)
