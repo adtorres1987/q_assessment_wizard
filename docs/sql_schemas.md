@@ -175,6 +175,23 @@ CREATE TABLE IF NOT EXISTS app_settings (
     misc                      TEXT DEFAULT ''
 );
 INSERT OR IGNORE INTO app_settings (id) VALUES (1);
+
+-- ============================================================
+-- PORTFOLIOS — Portfolio (LPA) configurations on an overlay result
+-- No solver yet: rows are saved with status 'pending'.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS portfolios (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_id INTEGER NOT NULL,
+    source_table  TEXT NOT NULL,                  -- overlay table, e.g. proj__assess__v2
+    name          TEXT NOT NULL,
+    config_json   TEXT DEFAULT '{}',              -- {engine, col_benefits, col_cost,
+                                                  --  col_priority, budget, buckets[]}
+    status        TEXT DEFAULT 'pending',
+    created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (assessment_id, name),
+    FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
+);
 ```
 
 **Incremental Migrations** (`_migrate_schema()`):
@@ -257,15 +274,15 @@ Created at runtime during overlay analysis. One table per version:
 --
 -- Example: forestproject__deforestation_2024__v3
 
-CREATE TABLE {versioned_name} (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- columns inherited from source layers:
-    input_id        INTEGER,            -- FK to target layer feature
-    identity_id     INTEGER,            -- FK to assessment layer feature
-    split_type      TEXT,               -- 'intersection' or 'union'
+CREATE TABLE {versioned_name} (       -- created with CREATE TABLE ... AS SELECT
+    input_id        INTEGER,            -- target layer feature id
+    identity_id     INTEGER,            -- assessment layer feature rowid (NULL for no_overlap)
+    geom            MULTIPOLYGON,
+    split_type      TEXT,               -- 'intersect' | 'no_overlap'
     shape_area      REAL,
     shape_length    REAL
-    -- additional columns from source layer attributes
+    -- MCDA_SCORE REAL is added by ApplyMcdaScore (score_table)
+    -- NOTE: source layer attributes are NOT carried over.
 );
 
 -- Geometry registration (SpatiaLite API):
@@ -606,44 +623,49 @@ The primary flow — creates versioned spatial overlay tables.
                                        └────────────────────────────┘
 ```
 
-**SQL executed during overlay (inside `SpatialAnalyzerLite`):**
+**SQL executed per cumulative step** (`OperationRunner._build_cumulative_step_query`
+in `core/infrastructure/spatial/operations.py`; one step per assessment layer, each
+step reads the previous step's output):
 
 ```sql
--- Step 3: Intersection
-CREATE TABLE {tmp_intersect} AS
+CREATE TABLE {output_table} AS
+-- Fragments that intersect the assessment layer
 SELECT
-    a.ROWID AS input_id,
-    b.ROWID AS identity_id,
-    ST_Intersection(a.geom, b.geom) AS geom,
-    'intersection' AS split_type,
-    ST_Area(ST_Intersection(a.geom, b.geom)) AS shape_area,
-    ST_Length(ST_Intersection(a.geom, b.geom)) AS shape_length
-FROM {target_table} a, {assessment_table} b
-WHERE ST_Intersects(a.geom, b.geom)
-  AND a.ROWID IN (
-      SELECT ROWID FROM SpatialIndex
-      WHERE f_table_name = '{target_table}' AND search_frame = b.geom
-  );
+    a.id AS input_id,                 -- step 2+: a.input_id (carried over)
+    b.rowid AS identity_id,
+    CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
+    'intersect' AS split_type,
+    Area(Intersection(a.geom, b.geom))      AS shape_area,
+    Perimeter(Intersection(a.geom, b.geom)) AS shape_length
+FROM {prev_table} a
+JOIN {assessment_table} b ON Intersects(a.geom, b.geom)
+WHERE IsValid(a.geom) AND IsValid(b.geom)
+  AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON','MULTIPOLYGON')
+  AND Area(Intersection(a.geom, b.geom)) > 0
 
--- Step 4: Union
-CREATE TABLE {tmp_union} AS
-SELECT * FROM {tmp_intersect}
 UNION ALL
-SELECT
-    a.ROWID AS input_id,
-    NULL AS identity_id,
-    ST_Difference(a.geom, (
-        SELECT ST_Union(b.geom) FROM {assessment_table} b
-        WHERE ST_Intersects(a.geom, b.geom)
-    )) AS geom,
-    'union' AS split_type,
-    ... -- area, length
-FROM {target_table} a;
 
--- Step 5: Geometry registration
-SELECT RecoverGeometryColumn('{final_table}', 'geom', {srid}, '{geom_type}', 'XY');
-SELECT CreateSpatialIndex('{final_table}', 'geom');
+-- Features that do not touch the assessment layer at all
+SELECT
+    a.id AS input_id, NULL AS identity_id,   -- step 2+: a.input_id, a.identity_id
+    CastToMultiPolygon(a.geom) AS geom,
+    'no_overlap' AS split_type,
+    Area(a.geom), Perimeter(a.geom)
+FROM {prev_table} a
+WHERE NOT EXISTS (SELECT 1 FROM {assessment_table} b
+                  WHERE Intersects(a.geom, b.geom) AND IsValid(b.geom));
+
+-- Geometry registration: MULTIPOLYGON, falling back to POLYGON / GEOMETRY.
+-- RecoverGeometryColumn() returns 0 on failure (it does not raise).
+SELECT RecoverGeometryColumn('{output_table}', 'geom', {srid}, 'MULTIPOLYGON', 'XY');
 ```
+
+> **Divergence from the original design.** The original design kept, for a
+> partially overlapping feature, its non-intersected remainder
+> (`ST_Difference(a.geom, ST_Union(b.geom))`). The current SQL does not: a target
+> feature that touches the assessment layer contributes **only** its intersection.
+> Consequently the per-feature `coverage_pct` shown in the Results Grid and the
+> histogram is always 100 % (touches) or 0 % (does not touch).
 
 ---
 

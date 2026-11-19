@@ -9,6 +9,8 @@ from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QFont
 from qgis.core import QgsProject
 
+from ...translator import tr
+
 
 class AssessmentDetailPanel(QWidget):
     """Structured detail card shown when an assessment node is selected.
@@ -23,6 +25,8 @@ class AssessmentDetailPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._assessment_id = None
+        self._created_at = ''
+        self._records = '—'
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -39,15 +43,15 @@ class AssessmentDetailPanel(QWidget):
         layout.addWidget(self._lbl_title)
 
         sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setFrameShadow(QFrame.Sunken)
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep1)
 
         # — Target layer row
         tgt_row = QHBoxLayout()
-        lbl_tgt_h = QLabel("Target:")
-        lbl_tgt_h.setFont(sm_bold)
-        tgt_row.addWidget(lbl_tgt_h)
+        self._lbl_tgt_h = QLabel()
+        self._lbl_tgt_h.setFont(sm_bold)
+        tgt_row.addWidget(self._lbl_tgt_h)
         self._lbl_target = QLabel("—")
         tgt_row.addWidget(self._lbl_target)
         tgt_row.addStretch()
@@ -55,26 +59,25 @@ class AssessmentDetailPanel(QWidget):
 
         # — Created / Records row
         meta_row = QHBoxLayout()
-        self._lbl_created = QLabel("Created: —")
-        self._lbl_records = QLabel("Records: —")
+        self._lbl_created = QLabel()
+        self._lbl_records = QLabel()
         meta_row.addWidget(self._lbl_created)
         meta_row.addStretch()
         meta_row.addWidget(self._lbl_records)
         layout.addLayout(meta_row)
 
         sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setFrameShadow(QFrame.Sunken)
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep2)
 
         # — Weights block
         w_header_row = QHBoxLayout()
-        lbl_w_h = QLabel("⚙ Weights:")
-        lbl_w_h.setFont(sm_bold)
-        w_header_row.addWidget(lbl_w_h)
+        self._lbl_w_h = QLabel()
+        self._lbl_w_h.setFont(sm_bold)
+        w_header_row.addWidget(self._lbl_w_h)
         w_header_row.addStretch()
-        self._btn_edit_weights = QPushButton("✏ Edit")
-        self._btn_edit_weights.setFixedWidth(60)
+        self._btn_edit_weights = QPushButton()
         self._btn_edit_weights.clicked.connect(self._on_edit_weights)
         w_header_row.addWidget(self._btn_edit_weights)
         layout.addLayout(w_header_row)
@@ -84,6 +87,20 @@ class AssessmentDetailPanel(QWidget):
         self._lbl_weights.setContentsMargins(10, 0, 0, 0)
         layout.addWidget(self._lbl_weights)
 
+        self._has_weights = False
+        self.retranslateUi()
+
+    def retranslateUi(self):
+        """Re-apply all static texts in the active language."""
+        self._lbl_tgt_h.setText(tr('panels.target'))
+        self._lbl_w_h.setText(tr('panels.weights'))
+        self._btn_edit_weights.setText(tr('panels.btn_edit'))
+        date_str = (self._created_at or '')[:10] or '—'
+        self._lbl_created.setText(tr('panels.created', date=date_str))
+        self._lbl_records.setText(tr('panels.records', count=self._records))
+        if self._assessment_id is not None and not self._has_weights:
+            self._lbl_weights.setText(tr('panels.no_weights'))
+
     def show_assessment(self, name, input_layers, target_layer, created_at,
                         assessment_id=None, weights=None):
         """Populate the card with assessment data."""
@@ -91,22 +108,21 @@ class AssessmentDetailPanel(QWidget):
         self._lbl_title.setText(f"📁 {name}")
         self._lbl_target.setText(target_layer or "—")
 
-        date_str = (created_at or '')[:10] or '—'
-        self._lbl_created.setText(f"Created: {date_str}")
+        self._created_at = created_at or ''
 
         records_str = "—"
         if target_layer:
             layers = QgsProject.instance().mapLayersByName(target_layer)
             if layers:
                 records_str = f"{layers[0].featureCount():,}"
-        self._lbl_records.setText(f"Records: {records_str}")
+        self._records = records_str
 
+        self._has_weights = bool(weights)
         if weights:
             self._lbl_weights.setText(
                 "\n".join(f"  {layer}: {w * 100:.0f}%" for layer, w in weights.items())
             )
-        else:
-            self._lbl_weights.setText("(no weights configured)")
+        self.retranslateUi()
 
         self._btn_edit_weights.setEnabled(assessment_id is not None)
 
@@ -117,8 +133,10 @@ class AssessmentDetailPanel(QWidget):
     def clear(self):
         """Reset to empty/default state."""
         self._assessment_id = None
+        self._created_at = ''
+        self._records = '—'
+        self._has_weights = False
         self._lbl_title.setText("—")
         self._lbl_target.setText("—")
-        self._lbl_created.setText("Created: —")
-        self._lbl_records.setText("Records: —")
         self._lbl_weights.setText("—")
+        self.retranslateUi()

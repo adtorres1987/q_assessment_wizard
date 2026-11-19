@@ -27,6 +27,9 @@ from .use_cases import (
     RerunSpatialAssessmentCommand,
     ApplyMcdaScoreCommand,
     RecordAssessmentCommand,
+    GetResultsGridCommand,
+    GetComparisonSeriesCommand,
+    CreatePortfolioCommand,
     CreateScenario,
     ApplyOverlay,
     RollbackVersion,
@@ -34,6 +37,10 @@ from .use_cases import (
     RerunSpatialAssessment,
     ApplyMcdaScore,
     RecordAssessment,
+    GetResultsGrid,
+    GetResultColumns,
+    GetComparisonSeries,
+    CreatePortfolio,
 )
 
 __all__ = [
@@ -44,6 +51,9 @@ __all__ = [
     'RerunSpatialAssessmentCommand',
     'ApplyMcdaScoreCommand',
     'RecordAssessmentCommand',
+    'GetResultsGridCommand',
+    'GetComparisonSeriesCommand',
+    'CreatePortfolioCommand',
     'CreateScenario',
     'ApplyOverlay',
     'RollbackVersion',
@@ -51,4 +61,8 @@ __all__ = [
     'RerunSpatialAssessment',
     'ApplyMcdaScore',
     'RecordAssessment',
+    'GetResultsGrid',
+    'GetResultColumns',
+    'GetComparisonSeries',
+    'CreatePortfolio',
 ]

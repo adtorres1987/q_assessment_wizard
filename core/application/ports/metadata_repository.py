@@ -75,3 +75,12 @@ class MetadataRepositoryPort(Protocol):
     def snapshot_analysis_for_version(self, assessment_id: int,
                                       output_table: str,
                                       version_num: int): ...
+
+    # ------------------------------------------------------------------ #
+    #  Portfolios (LPA configuration — no solver yet, saved as 'pending')
+    # ------------------------------------------------------------------ #
+
+    def create_portfolio(self, assessment_id: int, source_table: str,
+                         name: str, config_json: str) -> int: ...
+
+    def portfolio_name_exists(self, assessment_id: int, name: str) -> bool: ...

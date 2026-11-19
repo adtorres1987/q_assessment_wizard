@@ -12,7 +12,7 @@
             "pathMappings": [
                 {
                     "localRoot": "${workspaceFolder}",
-                    "remoteRoot": "/Users/alfredotorres/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/assessment_wizard"
+                    "remoteRoot": "/Users/alfredotorres/Library/Application Support/QGIS/QGIS4/profiles/default/python/plugins/q_assessment_wizard"
                 }
             ],
             "justMyCode": true

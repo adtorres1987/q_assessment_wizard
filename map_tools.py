@@ -10,7 +10,7 @@ from qgis.core import (
     QgsWkbTypes, QgsRectangle, QgsFeatureRequest
 )
 from qgis.gui import QgsMapTool, QgsRubberBand
-from PyQt5.QtGui import QColor
+from qgis.PyQt.QtGui import QColor
 
 from .geometry_utils import transform_point_to_layer_crs, transform_rect_to_layer_crs
 
@@ -29,7 +29,7 @@ class FeatureSelectionTool(QgsMapTool):
         super(FeatureSelectionTool, self).__init__(canvas)
         self.layer = layer
         self.selection_callback = selection_callback
-        self.setCursor(Qt.CrossCursor)
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
     def create_layer_from_feature_id(self, source_layer, feature_ids):
         """Create a new memory layer from selected feature IDs.
@@ -153,11 +153,11 @@ class RectangleSelectTool(QgsMapTool):
         self.rubber_band.setWidth(2)
         self.start_point = None
         self.end_point = None
-        self.setCursor(Qt.CrossCursor)
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
     def canvasPressEvent(self, event):
         """Handle mouse press event."""
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.start_point = self.toMapCoordinates(event.pos())
             self.end_point = self.start_point
             self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
@@ -171,7 +171,7 @@ class RectangleSelectTool(QgsMapTool):
 
     def canvasReleaseEvent(self, event):
         """Handle mouse release event to select features (rectangle or point)."""
-        if event.button() != Qt.LeftButton or self.start_point is None:
+        if event.button() != Qt.MouseButton.LeftButton or self.start_point is None:
             return
 
         self.end_point = self.toMapCoordinates(event.pos())
@@ -186,7 +186,7 @@ class RectangleSelectTool(QgsMapTool):
             abs(self.start_point.y() - self.end_point.y()) < self.canvas.mapUnitsPerPixel() * 3
         )
 
-        additive = event.modifiers() & Qt.ShiftModifier
+        additive = event.modifiers() & Qt.KeyboardModifier.ShiftModifier
 
         # Use target layer if specified, otherwise use all visible vector layers
         if self.target_layer:

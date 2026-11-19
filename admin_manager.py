@@ -217,6 +217,22 @@ class AdminManager:
             )
         """)
 
+        # portfolios — Portfolio (LPA) configurations built on an overlay
+        # result. No solver yet: rows are stored with status 'pending'.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS portfolios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id INTEGER NOT NULL,
+                source_table TEXT NOT NULL,
+                name TEXT NOT NULL,
+                config_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (assessment_id, name),
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id) ON DELETE CASCADE
+            )
+        """)
+
         self.connection.commit()
         cursor.close()
 
@@ -656,6 +672,7 @@ class AdminManager:
         cursor = self.connection.cursor()
         # analysis_weights cascade-deletes from analyses via FK
         cursor.execute("DELETE FROM analyses WHERE assessment_id = ?", (assessment_id,))
+        cursor.execute("DELETE FROM portfolios WHERE assessment_id = ?", (assessment_id,))
         cursor.execute("DELETE FROM assessment_criteria WHERE assessment_id = ?", (assessment_id,))
         cursor.execute("DELETE FROM assessments WHERE id = ?", (assessment_id,))
         self.connection.commit()
@@ -897,6 +914,79 @@ class AdminManager:
             'parameters': r[13], 'comments': r[14], 'created_at': r[15],
             'engine_type': r[16] if len(r) > 16 else 'spatialite',
             'is_scenario': bool(r[17]) if len(r) > 17 else False,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  Portfolios (LPA configuration)
+    # ------------------------------------------------------------------ #
+
+    def create_portfolio(self, assessment_id, source_table, name, config_json):
+        """Insert a portfolio configuration (status 'pending'). Returns its id."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO portfolios (assessment_id, source_table, name, config_json) "
+                "VALUES (?, ?, ?, ?)",
+                (assessment_id, source_table, name, config_json),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+        finally:
+            cursor.close()
+
+    def portfolio_name_exists(self, assessment_id, name):
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT 1 FROM portfolios WHERE assessment_id = ? AND name = ?",
+                (assessment_id, name),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            cursor.close()
+
+    def get_portfolios_for_assessment(self, assessment_id):
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT id, assessment_id, source_table, name, config_json, status, created_at "
+                "FROM portfolios WHERE assessment_id = ? ORDER BY id",
+                (assessment_id,),
+            )
+            return [self._row_to_portfolio(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_portfolio(self, portfolio_id):
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT id, assessment_id, source_table, name, config_json, status, created_at "
+                "FROM portfolios WHERE id = ?",
+                (portfolio_id,),
+            )
+            row = cursor.fetchone()
+            return self._row_to_portfolio(row) if row else None
+        finally:
+            cursor.close()
+
+    def delete_portfolio(self, portfolio_id):
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute("DELETE FROM portfolios WHERE id = ?", (portfolio_id,))
+            self.connection.commit()
+        finally:
+            cursor.close()
+
+    @staticmethod
+    def _row_to_portfolio(r):
+        try:
+            config = json.loads(r[4] or '{}')
+        except (ValueError, TypeError):
+            config = {}
+        return {
+            'id': r[0], 'assessment_id': r[1], 'source_table': r[2],
+            'name': r[3], 'config': config, 'status': r[5], 'created_at': r[6],
         }
 
     # ------------------------------------------------------------------ #

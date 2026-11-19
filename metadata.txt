@@ -4,7 +4,9 @@
 
 [general]
 name=Assessment Wizard
-qgisMinimumVersion=3.0
+qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
+supportsQt6=True
 description=Wizard to evaluation assessment
 version=0.1
 author=David Torres

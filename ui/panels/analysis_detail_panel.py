@@ -10,6 +10,8 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QFont
 
+from ...translator import tr
+
 
 class WeightsEditDialog(QDialog):
     """Modal dialog for editing per-layer MCDA weights.
@@ -20,7 +22,7 @@ class WeightsEditDialog(QDialog):
 
     def __init__(self, assessment_id, admin_manager, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Edit MCDA Weights")
+        self.setWindowTitle(tr('panels.weights_dlg_title'))
         self.assessment_id  = assessment_id
         self.admin_manager  = admin_manager
         self._spinboxes     = {}   # layer_name → QDoubleSpinBox
@@ -37,7 +39,7 @@ class WeightsEditDialog(QDialog):
             if k not in layer_names:
                 layer_names.append(k)
 
-        layout.addWidget(QLabel("Set weights per assessment layer (must sum to 100 %):"))
+        layout.addWidget(QLabel(tr('panels.weights_dlg_intro')))
 
         form = QGridLayout()
         n = len(layer_names) or 1
@@ -60,9 +62,9 @@ class WeightsEditDialog(QDialog):
         self._update_total()
 
         btn_row    = QHBoxLayout()
-        btn_save   = QPushButton("Save")
+        btn_save   = QPushButton(tr('panels.btn_save'))
         btn_save.clicked.connect(self._on_save)
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton(tr('panels.btn_cancel'))
         btn_cancel.clicked.connect(self.reject)
         btn_row.addStretch()
         btn_row.addWidget(btn_save)
@@ -72,17 +74,15 @@ class WeightsEditDialog(QDialog):
     def _update_total(self):
         total = sum(s.value() for s in self._spinboxes.values())
         color = "green" if abs(total - 100) < 0.1 else "red"
-        self._lbl_total.setText(
-            f'<span style="color:{color}">Total: {total:.1f}% '
-            f'(must be 100%)</span>'
-        )
+        text = tr('panels.weights_total', total=f"{total:.1f}")
+        self._lbl_total.setText(f'<span style="color:{color}">{text}</span>')
 
     def _on_save(self):
         total = sum(s.value() for s in self._spinboxes.values())
         if abs(total - 100) > 0.5:
             QMessageBox.warning(
-                self, "Invalid Weights",
-                f"Weights must sum to 100%. Currently: {total:.1f}%"
+                self, tr('panels.invalid_weights_title'),
+                tr('panels.invalid_weights_body', total=f"{total:.1f}")
             )
             return
         weights = {name: round(s.value() / 100, 4)
@@ -124,15 +124,15 @@ class AnalysisDetailPanel(QWidget):
         layout.addWidget(self._lbl_title)
 
         sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setFrameShadow(QFrame.Sunken)
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep1)
 
         # Output table row
         tbl_row = QHBoxLayout()
-        lbl_tbl_h = QLabel("Output:")
-        lbl_tbl_h.setFont(sm_bold)
-        tbl_row.addWidget(lbl_tbl_h)
+        self._lbl_tbl_h = QLabel()
+        self._lbl_tbl_h.setFont(sm_bold)
+        tbl_row.addWidget(self._lbl_tbl_h)
         self._lbl_table = QLabel("—")
         self._lbl_table.setWordWrap(True)
         tbl_row.addWidget(self._lbl_table)
@@ -140,28 +140,38 @@ class AnalysisDetailPanel(QWidget):
         layout.addLayout(tbl_row)
 
         sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setFrameShadow(QFrame.Sunken)
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep2)
 
         # Weights (read-only)
-        lbl_w_h = QLabel("⚙ Weights used:")
-        lbl_w_h.setFont(sm_bold)
-        layout.addWidget(lbl_w_h)
+        self._lbl_w_h = QLabel()
+        self._lbl_w_h.setFont(sm_bold)
+        layout.addWidget(self._lbl_w_h)
         self._lbl_weights = QLabel("—")
         self._lbl_weights.setWordWrap(True)
         self._lbl_weights.setContentsMargins(10, 0, 0, 0)
         layout.addWidget(self._lbl_weights)
 
         sep3 = QFrame()
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setFrameShadow(QFrame.Sunken)
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep3)
 
         # Run Again button
-        self._btn_run = QPushButton("▶ Run Again")
+        self._btn_run = QPushButton()
         self._btn_run.clicked.connect(self._on_run_again)
         layout.addWidget(self._btn_run)
+
+        self.retranslateUi()
+
+    def retranslateUi(self):
+        """Re-apply static texts (and reload the current node) in the active language."""
+        self._lbl_tbl_h.setText(tr('panels.output'))
+        self._lbl_w_h.setText(tr('panels.weights_used'))
+        self._btn_run.setText(tr('panels.btn_run_again'))
+        if self._assessment_id is not None:
+            self.load(self._assessment_id, self._table_name, self._model_name)
 
     # ------------------------------------------------------------------ #
     #  Public API
@@ -196,9 +206,9 @@ class AnalysisDetailPanel(QWidget):
                               for name, w in weights.items())
                 )
             else:
-                self._lbl_weights.setText("  (no weights configured)")
+                self._lbl_weights.setText(f"  {tr('panels.no_weights')}")
         else:
-            self._lbl_weights.setText("  (no config)")
+            self._lbl_weights.setText(f"  {tr('panels.no_config')}")
 
     def clear(self):
         """Reset to empty/default state."""

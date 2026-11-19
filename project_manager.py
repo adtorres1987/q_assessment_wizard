@@ -10,7 +10,7 @@ import re
 import os
 
 from qgis.core import QgsWkbTypes
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant
 
 
 class ProjectManager:
@@ -674,50 +674,62 @@ class ProjectManager:
     # ------------------------------------------------------------------ #
 
     def _load_spatialite(self):
-        """Load the SpatiaLite extension, trying multiple paths."""
-        # 1. Try QGIS built-in finder (works inside QGIS on all platforms)
-        try:
-            from qgis.utils import spatialite_connect
-            # If qgis.utils has spatialite_connect, use its approach
-            self.connection.load_extension("mod_spatialite")
-            return
-        except Exception:
-            pass
+        """Load the SpatiaLite extension, trying multiple names and paths.
 
-        # 2. Try QGIS Mac Packager's finder
+        QGIS 4 macOS bundles ship ``Contents/Frameworks/mod_spatialite.so``;
+        SQLite's bare ``"mod_spatialite"`` lookup appends ``.dylib`` there and
+        fails, so the explicit ``.so`` name must also be tried.
+        """
+        errors = []
+
+        # 1. Library names resolved by the dynamic loader (same order as
+        #    qgis.utils.spatialite_connect).
+        for name in ("mod_spatialite", "mod_spatialite.so", "mod_spatialite.dylib"):
+            try:
+                self.connection.load_extension(name)
+                return
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+
+        # 2. QGIS Mac Packager's finder (older QGIS 3 bundles)
         try:
             from qgis.find_mod_spatialite import mod_spatialite_path
-            path = mod_spatialite_path()
-            self.connection.load_extension(path)
+            self.connection.load_extension(mod_spatialite_path())
             return
         except Exception:
             pass
 
-        # 3. Try common macOS QGIS paths
-        mac_paths = [
-            "/Applications/QGIS.app/Contents/MacOS/lib/mod_spatialite.7.so",
-            "/Applications/QGIS.app/Contents/MacOS/lib/mod_spatialite.so",
-            "/Applications/QGIS-LTR.app/Contents/MacOS/lib/mod_spatialite.7.so",
-            "/Applications/QGIS-LTR.app/Contents/MacOS/lib/mod_spatialite.so",
-        ]
-        
-        for path in mac_paths:
-            if os.path.exists(path):
+        # 3. Search next to the running QGIS install (any .app name/version)
+        candidates = []
+        try:
+            from qgis.core import QgsApplication
+            prefix = QgsApplication.prefixPath()
+            if prefix:
+                for rel in ("", "lib", "Frameworks", "../Frameworks",
+                            "../../Frameworks", "MacOS/lib", "../MacOS/lib"):
+                    candidates.append(os.path.normpath(os.path.join(prefix, rel)))
+        except Exception:
+            pass
+        for app in ("QGIS.app", "QGIS-LTR.app"):
+            candidates.append(f"/Applications/{app}/Contents/Frameworks")
+            candidates.append(f"/Applications/{app}/Contents/MacOS/lib")
+
+        import glob
+        for folder in dict.fromkeys(candidates):
+            for path in sorted(glob.glob(os.path.join(folder, "mod_spatialite*"))):
+                if not path.endswith((".so", ".dylib", ".dll")):
+                    continue
                 try:
                     self.connection.load_extension(path)
                     return
-                except Exception:
-                    continue
+                except Exception as e:
+                    errors.append(f"{path}: {e}")
 
-        # 4. Try generic name (Linux, or if in PATH)
-        try:
-            self.connection.load_extension("mod_spatialite")
-            return
-        except Exception as e:
-            raise Exception(
-                f"Could not load SpatiaLite extension: {e}\n"
-                "Make sure SpatiaLite is installed and accessible."
-            )
+        raise Exception(
+            "Could not load SpatiaLite extension.\n"
+            + "\n".join(errors)
+            + "\nMake sure SpatiaLite is installed and accessible."
+        )
 
     def sanitize_table_name(self, layer_name):
         """Convert layer name to valid SQLite table name.

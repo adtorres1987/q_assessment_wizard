@@ -9,17 +9,19 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.core import QgsProject
 
+from ...translator import tr
+
 # Custom data roles
-ROLE_ID             = Qt.UserRole
-ROLE_TYPE           = Qt.UserRole + 1
-ROLE_OUTPUT_TABLES  = Qt.UserRole + 2
-ROLE_SCENARIO_NAME  = Qt.UserRole + 3   # base scenario name (without __v{n})
-ROLE_NAME           = Qt.UserRole + 4   # raw name (separate from display text)
+ROLE_ID             = Qt.ItemDataRole.UserRole
+ROLE_TYPE           = Qt.ItemDataRole.UserRole + 1
+ROLE_OUTPUT_TABLES  = Qt.ItemDataRole.UserRole + 2
+ROLE_SCENARIO_NAME  = Qt.ItemDataRole.UserRole + 3   # base scenario name (without __v{n})
+ROLE_NAME           = Qt.ItemDataRole.UserRole + 4   # raw name (separate from display text)
 
 
 class EMDSTreeModel:
     """Builds the EMDS tree:
-    Project → Base Layers | Assessment → Weights + Analysis v{n}
+    Project → Base Layers | Assessment → Weights + Analysis v{n} + Portfolios
     """
 
     @staticmethod
@@ -56,7 +58,7 @@ class EMDSTreeModel:
             proj_item.setData(0, ROLE_ID,   project['id'])
             proj_item.setData(0, ROLE_TYPE, 'project')
             proj_item.setData(0, ROLE_NAME, project['name'])
-            proj_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            proj_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
             if selected_type == 'project' and selected_id == project['id']:
                 item_to_select = proj_item
@@ -67,10 +69,10 @@ class EMDSTreeModel:
             base_layers = EMDSTreeModel._get_base_layers(project, admin_manager)
             if base_layers:
                 bl_group = QTreeWidgetItem(proj_item)
-                bl_group.setText(0, "📁 Base Layers")
+                bl_group.setText(0, tr('tree.base_layers'))
                 bl_group.setFont(0, italic_font)
                 bl_group.setData(0, ROLE_TYPE, 'base_layers_group')
-                bl_group.setFlags(Qt.ItemIsEnabled)
+                bl_group.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 if should_expand:
                     bl_group.setExpanded(True)
                 for layer in base_layers:
@@ -79,7 +81,7 @@ class EMDSTreeModel:
                     l_item.setText(0, f"{icon} {layer['layer_name']}")
                     l_item.setData(0, ROLE_TYPE, 'base_layer')
                     l_item.setData(0, ROLE_NAME, layer['layer_name'])
-                    l_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    l_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
             # ── Assessments (direct children — no wrapper group) ──────────
             assessments = admin_manager.get_assessments_for_project(project['id'])
@@ -90,17 +92,17 @@ class EMDSTreeModel:
                 a_item.setData(0, ROLE_ID,   assessment['id'])
                 a_item.setData(0, ROLE_TYPE, 'assessment')
                 a_item.setData(0, ROLE_NAME, assessment['name'])
-                a_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                a_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
                 if selected_type == 'assessment' and selected_id == assessment['id']:
                     item_to_select = a_item
 
                 # ── ⚙ Weights ─────────────────────────────────────────────
                 w_item = QTreeWidgetItem(a_item)
-                w_item.setText(0, "⚙ Weights")
+                w_item.setText(0, tr('tree.weights'))
                 w_item.setData(0, ROLE_TYPE, 'weights')
                 w_item.setData(0, ROLE_ID,   assessment['id'])
-                w_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                w_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
                 config = admin_manager.get_analysis_config(assessment['id'])
                 if config:
@@ -109,7 +111,7 @@ class EMDSTreeModel:
                         for layer_name, w in weights.items():
                             wl_item = QTreeWidgetItem(w_item)
                             wl_item.setText(0, f"  {layer_name}: {w * 100:.0f}%")
-                            wl_item.setFlags(Qt.ItemIsEnabled)
+                            wl_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -137,21 +139,37 @@ class EMDSTreeModel:
                     v_num     = int(v_match.group(1)) if v_match else 1
                     scen_name = re.sub(r'__v\d+$', '', table_name)
 
+                    an_label  = tr('tree.analysis', n=v_num)
                     an_item = QTreeWidgetItem(a_item)
-                    an_item.setText(0, f"🔁 Analysis v{v_num}")
+                    an_item.setText(0, f"🔁 {an_label}")
                     an_item.setData(0, ROLE_TYPE,          'analysis')
                     an_item.setData(0, ROLE_ID,            assessment['id'])
-                    an_item.setData(0, ROLE_NAME,          f"Analysis v{v_num}")
+                    an_item.setData(0, ROLE_NAME,          an_label)
                     an_item.setData(0, ROLE_OUTPUT_TABLES, [table_name])
                     an_item.setData(0, ROLE_SCENARIO_NAME, scen_name)
                     an_item.setFlags(
-                        Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable
                     )
                     is_visible = vis_cache.get(table_name, True)
-                    an_item.setCheckState(0, Qt.Checked if is_visible else Qt.Unchecked)
+                    an_item.setCheckState(0, Qt.CheckState.Checked if is_visible else Qt.CheckState.Unchecked)
 
                     if selected_type == 'analysis' and selected_id == assessment['id']:
                         item_to_select = an_item
+
+                # ── 💼 Portfolios (LPA configurations, status 'pending') ──
+                for portfolio in admin_manager.get_portfolios_for_assessment(assessment['id']):
+                    pf_item = QTreeWidgetItem(a_item)
+                    pf_item.setText(0, tr(
+                        'tree.portfolio', name=portfolio['name'],
+                        status=tr(f"tree.status_{portfolio['status']}"),
+                    ))
+                    pf_item.setData(0, ROLE_TYPE, 'portfolio')
+                    pf_item.setData(0, ROLE_ID,   portfolio['id'])
+                    pf_item.setData(0, ROLE_NAME, portfolio['name'])
+                    pf_item.setData(0, ROLE_OUTPUT_TABLES, [portfolio['source_table']])
+                    pf_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                    if selected_type == 'portfolio' and selected_id == portfolio['id']:
+                        item_to_select = pf_item
 
             if should_expand:
                 proj_item.setExpanded(True)

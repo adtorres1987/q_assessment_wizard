@@ -43,18 +43,21 @@ class OperationRunner:
         srid = row[0] if row else 4326
         cursor.close()
 
+        # RecoverGeometryColumn() reports failure by returning 0 (it does not
+        # raise), so check its result before falling back to the next type.
         registered = False
         for try_type in ['MULTIPOLYGON', 'POLYGON', 'GEOMETRY']:
             try:
-                conn.execute(
+                ok = conn.execute(
                     f"SELECT RecoverGeometryColumn("
                     f"'{output_table}', 'geom', {srid}, '{try_type}', 'XY')"
-                )
+                ).fetchone()[0]
                 conn.commit()
-                registered = True
-                break
             except Exception:
                 continue
+            if ok == 1:
+                registered = True
+                break
         if not registered:
             raise RuntimeError(
                 f"Could not register geometry for cumulative step '{output_table}'"
@@ -126,7 +129,7 @@ class OperationRunner:
 
         SELECT
             {noop_id},
-            a.geom,
+            CastToMultiPolygon(a.geom) AS geom,
             'no_overlap' AS split_type,
             Area(a.geom)      AS shape_area,
             Perimeter(a.geom) AS shape_length

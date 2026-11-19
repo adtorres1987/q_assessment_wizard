@@ -49,4 +49,16 @@ class SpatialEnginePort(Protocol):
 
     def drop_table(self, table_name: str): ...
 
+    # Read-only result queries (results grid / comparison histogram).
+    # Raise LookupError if the table is missing, ValueError if it is not an
+    # overlay output.
+
+    def result_columns(self, table_name: str) -> List[str]: ...
+
+    def results_summary(self, table_name: str) -> tuple:
+        """Per-target-feature aggregates: (columns, rows)."""
+        ...
+
+    def results_values(self, table_name: str, field: str) -> List[float]: ...
+
     def sanitize_name(self, raw_name: str) -> str: ...

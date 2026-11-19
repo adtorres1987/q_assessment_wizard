@@ -8,6 +8,7 @@ from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
 from qgis.PyQt.QtCore import Qt, QCoreApplication
 
 from .project_manager import ProjectManager
+from .translator import tr
 
 
 class LayerMigrationService:
@@ -45,8 +46,8 @@ class LayerMigrationService:
             if not project_db_path:
                 QMessageBox.critical(
                     parent_widget,
-                    "Database Error",
-                    "Project database path not found."
+                    tr('dialog.err_db_path_title'),
+                    tr('dialog.err_db_path_body')
                 )
                 return False
 
@@ -56,16 +57,16 @@ class LayerMigrationService:
             except Exception as e:
                 QMessageBox.critical(
                     parent_widget,
-                    "Database Connection Error",
-                    f"Failed to connect to project database:\n{str(e)}"
+                    tr('dialog.err_db_title'),
+                    tr('dialog.err_db_body', error=str(e))
                 )
                 return False
 
             if not layers_dict:
                 QMessageBox.information(
                     parent_widget,
-                    "Migration Info",
-                    "No layers selected for migration."
+                    tr('dialog.mig_info_title'),
+                    tr('dialog.mig_no_layers')
                 )
                 pm.disconnect()
                 return True
@@ -79,37 +80,36 @@ class LayerMigrationService:
 
             if existing_tables:
                 tables_list = "\n".join([f"• {name}" for name in existing_tables])
-                message = f"The following tables already exist in the database:\n\n{tables_list}\n\n"
-                message += "Do you want to overwrite these layers?"
+                message = tr('dialog.mig_overwrite_body', tables=tables_list)
 
                 reply = QMessageBox.question(
                     parent_widget,
-                    "Tables Already Exist",
+                    tr('dialog.mig_exists_title'),
                     message,
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
                 )
 
-                if reply == QMessageBox.No:
+                if reply == QMessageBox.StandardButton.No:
                     for layer_name in existing_tables:
                         del layers_dict[layer_name]
 
                     if not layers_dict:
                         QMessageBox.information(
                             parent_widget,
-                            "Migration Cancelled",
-                            "No new layers to migrate."
+                            tr('dialog.mig_cancelled_title'),
+                            tr('dialog.mig_no_new_layers')
                         )
                         pm.disconnect()
                         return True
 
             # Create progress dialog
             progress = QProgressDialog(
-                "Migrating layers to SpatiaLite...", "Cancel",
+                tr('dialog.prog_migrating'), tr('dialog.btn_cancel'),
                 0, len(layers_dict), parent_widget
             )
-            progress.setWindowTitle("Database Migration")
-            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle(tr('dialog.prog_db_migration'))
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(0)
             progress.setValue(0)
 
@@ -139,18 +139,18 @@ class LayerMigrationService:
             if failed_layers:
                 QMessageBox.warning(
                     parent_widget,
-                    "Migration Completed with Errors",
-                    f"Some layers failed to migrate:\n\n" + "\n".join(failed_layers)
+                    tr('dialog.mig_error_title'),
+                    tr('dialog.mig_error_body', errors="\n".join(failed_layers))
                 )
             else:
-                summary = f"Successfully migrated {len(layers_dict)} layer(s) to SpatiaLite:\n\n"
-                summary += f"Total features inserted: {total_stats['inserted']}\n"
+                summary = tr('dialog.mig_success_short', count=len(layers_dict),
+                             inserted=total_stats['inserted'])
                 if total_stats['errors'] > 0:
-                    summary += f"Total errors: {total_stats['errors']}"
+                    summary += tr('dialog.mig_success_errors', errors=total_stats['errors'])
 
                 QMessageBox.information(
                     parent_widget,
-                    "Migration Successful",
+                    tr('dialog.mig_success_title'),
                     summary
                 )
 
@@ -161,13 +161,13 @@ class LayerMigrationService:
             if 'cancelled by user' in str(e).lower():
                 QMessageBox.information(
                     parent_widget,
-                    "Migration Cancelled",
-                    "Migration cancelled by user."
+                    tr('dialog.mig_user_cancel_title'),
+                    tr('dialog.mig_user_cancel_body')
                 )
             else:
                 QMessageBox.critical(
                     parent_widget,
-                    "Migration Error",
-                    f"An error occurred during migration:\n{str(e)}"
+                    tr('dialog.mig_err_title'),
+                    tr('dialog.mig_err_body', error=str(e))
                 )
             return False

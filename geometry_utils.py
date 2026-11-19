@@ -7,8 +7,47 @@ and assessment complexity detection.
 
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsPointXY, QgsRectangle,
-    QgsWkbTypes, QgsCoordinateTransform
+    QgsWkbTypes, QgsCoordinateTransform, QgsCoordinateReferenceSystem,
+    QgsCsException
 )
+
+from .translator import tr
+
+WEB_MERCATOR = "EPSG:3857"
+
+
+def choose_canvas_crs(layer):
+    """Pick the CRS for a wizard map canvas showing ``layer``.
+
+    Web Mercator is preferred so the OpenStreetMap basemap can be drawn.
+    If the layer's extent cannot be reprojected to Web Mercator (layer has no
+    CRS, or a wrong one, e.g. projected metre coordinates tagged as
+    EPSG:4326), fall back to the layer's own CRS and skip the basemap.
+
+    Returns:
+        tuple: (QgsCoordinateReferenceSystem, use_basemap: bool)
+    """
+    web_mercator = QgsCoordinateReferenceSystem(WEB_MERCATOR)
+    layer_crs = layer.crs()
+    if not layer_crs.isValid():
+        return layer_crs, False
+
+    extent = layer.extent()
+    if extent.isNull() or extent.isEmpty():
+        return web_mercator, True
+
+    if layer_crs.isGeographic() and (
+            extent.xMinimum() < -180 or extent.xMaximum() > 180
+            or extent.yMinimum() < -90 or extent.yMaximum() > 90):
+        return layer_crs, False
+
+    try:
+        QgsCoordinateTransform(
+            layer_crs, web_mercator, QgsProject.instance()
+        ).transformBoundingBox(extent)
+    except QgsCsException:
+        return layer_crs, False
+    return web_mercator, True
 
 
 def transform_point_to_layer_crs(canvas, layer, map_point, search_radius):
@@ -29,9 +68,12 @@ def transform_point_to_layer_crs(canvas, layer, map_point, search_radius):
             layer.crs(),
             QgsProject.instance()
         )
-        layer_point = transform.transform(map_point)
-        test_point = QgsPointXY(map_point.x() + search_radius, map_point.y())
-        transformed_test = transform.transform(test_point)
+        try:
+            layer_point = transform.transform(map_point)
+            test_point = QgsPointXY(map_point.x() + search_radius, map_point.y())
+            transformed_test = transform.transform(test_point)
+        except QgsCsException:
+            return map_point, search_radius
         layer_search_radius = layer_point.distance(transformed_test)
         return layer_point, layer_search_radius
 
@@ -56,7 +98,13 @@ def transform_extent_to_canvas_crs(canvas, layer):
                 canvas.mapSettings().destinationCrs(),
                 QgsProject.instance()
             )
-            extent = transform.transformBoundingBox(extent)
+            try:
+                extent = transform.transformBoundingBox(extent)
+            except QgsCsException:
+                full = canvas.fullExtent()
+                if not full.isNull() and not full.isEmpty():
+                    return full
+                return QgsRectangle(-20037508, -20037508, 20037508, 20037508)
         extent.scale(1.1)
         return extent
 
@@ -81,7 +129,10 @@ def transform_rect_to_layer_crs(canvas, layer, rect):
             layer.crs(),
             QgsProject.instance()
         )
-        return transform.transformBoundingBox(rect)
+        try:
+            return transform.transformBoundingBox(rect)
+        except QgsCsException:
+            return rect
     return rect
 
 
@@ -147,7 +198,8 @@ def detect_assessment_complexity(table_widget, status_constants):
 
         if layer_name_item and status_combo:
             layer_name = layer_name_item.text()
-            status = status_combo.currentText()
+            # Status combos store the language-independent key as item data.
+            status = status_combo.currentData() or status_combo.currentText()
 
             layers = QgsProject.instance().mapLayersByName(layer_name)
             if layers and isinstance(layers[0], QgsVectorLayer):
@@ -236,55 +288,42 @@ def get_assessment_summary(table_widget, status_constants):
     complexity = detect_assessment_complexity(table_widget, status_constants)
 
     if complexity['is_simple']:
-        return "Simple Assessment (Target layer only)"
+        return tr('dialog.summary_simple')
+
+    def _operations_line():
+        if complexity['requires_union'] and complexity['requires_intersect']:
+            return tr('dialog.summary_union_intersect')
+        if complexity['requires_union']:
+            return tr('dialog.summary_union')
+        if complexity['requires_intersect']:
+            return tr('dialog.summary_intersect')
+        return None
+
+    def _counts_lines():
+        lines = []
+        if complexity['included_layers']:
+            lines.append(tr('dialog.summary_n_assess', count=len(complexity['included_layers'])))
+        if complexity['spatial_markers']:
+            lines.append(tr('dialog.summary_n_markers', count=len(complexity['spatial_markers'])))
+        return lines
 
     if complexity['is_easy_complex']:
-        summary_parts = ["Easy Complex Assessment:"]
-        summary_parts.append("- 1 assessment layer to combine")
-        summary_parts.append("- 1 spatial marker for filtering")
+        parts = [tr('dialog.summary_easy_complex'),
+                 tr('dialog.summary_one_assess'),
+                 tr('dialog.summary_one_marker')]
+    elif complexity['is_super_complex']:
+        parts = [tr('dialog.summary_super_complex')] + _counts_lines()
+    else:
+        parts = [tr('dialog.summary_complex')] + _counts_lines()
+        if complexity['operation_type'] != 'none':
+            parts.append({
+                'union': tr('dialog.summary_union'),
+                'intersect': tr('dialog.summary_intersect'),
+                'both': tr('dialog.summary_union_intersect'),
+            }.get(complexity['operation_type'], tr('dialog.summary_op_spatial')))
+        return "\n".join(parts)
 
-        if complexity['requires_union'] and complexity['requires_intersect']:
-            summary_parts.append("- Union and Intersection operations required")
-        elif complexity['requires_union']:
-            summary_parts.append("- Union operation required")
-        elif complexity['requires_intersect']:
-            summary_parts.append("- Intersection operation required")
-
-        return "\n".join(summary_parts)
-
-    if complexity['is_super_complex']:
-        summary_parts = ["Super Complex Assessment:"]
-
-        if complexity['included_layers']:
-            summary_parts.append(f"- {len(complexity['included_layers'])} assessment layer(s) to combine")
-
-        if complexity['spatial_markers']:
-            summary_parts.append(f"- {len(complexity['spatial_markers'])} spatial marker(s) for filtering")
-
-        if complexity['requires_union'] and complexity['requires_intersect']:
-            summary_parts.append("- Union and Intersection operations required")
-        elif complexity['requires_union']:
-            summary_parts.append("- Union operation required")
-        elif complexity['requires_intersect']:
-            summary_parts.append("- Intersection operation required")
-
-        return "\n".join(summary_parts)
-
-    # Default complex case
-    summary_parts = ["Complex Assessment:"]
-
-    if complexity['included_layers']:
-        summary_parts.append(f"- {len(complexity['included_layers'])} assessment layer(s) to combine")
-
-    if complexity['spatial_markers']:
-        summary_parts.append(f"- {len(complexity['spatial_markers'])} spatial marker(s) for filtering")
-
-    if complexity['operation_type'] != 'none':
-        operation_desc = {
-            'union': 'Union operation required',
-            'intersect': 'Intersection operation required',
-            'both': 'Union and Intersection operations required'
-        }
-        summary_parts.append(f"- {operation_desc.get(complexity['operation_type'], 'Spatial operations required')}")
-
-    return "\n".join(summary_parts)
+    op_line = _operations_line()
+    if op_line:
+        parts.append(op_line)
+    return "\n".join(parts)

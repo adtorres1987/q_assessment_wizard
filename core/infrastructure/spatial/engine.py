@@ -10,6 +10,7 @@ Clean Architecture position:
 
 from .repository import SpatialRepository
 from .operations import OperationRunner
+from . import result_queries
 
 
 class SpatialEngine:
@@ -171,6 +172,32 @@ class SpatialEngine:
             )
         """)
         conn.commit()
+
+    # ------------------------------------------------------------------ #
+    #  Read-only result queries (results grid / comparison histogram)
+    # ------------------------------------------------------------------ #
+
+    def result_columns(self, table_name: str) -> list:
+        """Return the non-geometry columns of a result table."""
+        return result_queries.table_columns(
+            self._repo.project_manager.connection, table_name
+        )
+
+    def results_summary(self, table_name: str):
+        """Aggregate an overlay table per target feature.
+
+        Returns:
+            tuple: (columns: list[str], rows: list[tuple])
+        """
+        return result_queries.coverage_summary(
+            self._repo.project_manager.connection, table_name
+        )
+
+    def results_values(self, table_name: str, field: str) -> list:
+        """Return one aggregated value of *field* per target feature."""
+        return result_queries.coverage_values(
+            self._repo.project_manager.connection, table_name, field
+        )
 
     # ------------------------------------------------------------------ #
     #  Version history

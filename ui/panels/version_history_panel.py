@@ -33,11 +33,11 @@ class VersionHistoryPanel(QGroupBox):
         layout = QVBoxLayout(self)
 
         self._placeholder = QLabel("Select an analysis node to view version history.")
-        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._placeholder)
 
         self._list = QListWidget()
-        self._list.setSelectionMode(QListWidget.SingleSelection)
+        self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._list)
         self._list.hide()
@@ -110,8 +110,8 @@ class VersionHistoryPanel(QGroupBox):
             )
 
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole,     v['id'])
-            item.setData(Qt.UserRole + 1, is_head)
+            item.setData(Qt.ItemDataRole.UserRole,     v['id'])
+            item.setData(Qt.ItemDataRole.UserRole + 1, is_head)
             if is_head:
                 item.setFont(bold_font)
             self._list.addItem(item)
@@ -143,7 +143,7 @@ class VersionHistoryPanel(QGroupBox):
             return
 
         item = selected[0]
-        is_head = item.data(Qt.UserRole + 1)
+        is_head = item.data(Qt.ItemDataRole.UserRole + 1)
         self._btn_rollback.setEnabled(not is_head)
         self._btn_compare.setEnabled(
             not is_head and self._head_version_id is not None
@@ -153,12 +153,12 @@ class VersionHistoryPanel(QGroupBox):
         selected = self._list.selectedItems()
         if not selected or not self._scenario_name:
             return
-        version_id = selected[0].data(Qt.UserRole)
+        version_id = selected[0].data(Qt.ItemDataRole.UserRole)
         self.rollback_requested.emit(self._scenario_name, version_id)
 
     def _on_compare(self):
         selected = self._list.selectedItems()
         if not selected or not self._scenario_name or self._head_version_id is None:
             return
-        version_id = selected[0].data(Qt.UserRole)
+        version_id = selected[0].data(Qt.ItemDataRole.UserRole)
         self.compare_requested.emit(self._scenario_name, version_id, self._head_version_id)

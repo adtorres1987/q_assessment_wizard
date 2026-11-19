@@ -18,11 +18,15 @@ UI layer → AssessmentExecutor (this file)
 
 from qgis.PyQt.QtWidgets import QMessageBox
 
+from .translator import tr
 from .core.application import (
     CreateScenarioCommand,  CreateScenario,
     ApplyOverlayCommand,    ApplyOverlay,
     RollbackVersionCommand, RollbackVersion,
     CompareVersionsCommand, CompareVersions,
+    GetResultsGridCommand,  GetResultsGrid, GetResultColumns,
+    GetComparisonSeriesCommand, GetComparisonSeries,
+    CreatePortfolioCommand, CreatePortfolio,
 )
 from .core.application.use_cases.rerun_spatial_assessment import (
     RerunSpatialAssessment, RerunSpatialAssessmentCommand,
@@ -58,6 +62,10 @@ class AssessmentExecutor:
         self._rerun           = RerunSpatialAssessment(admin_manager, SpatialEngine)
         self._mcda            = ApplyMcdaScore(admin_manager, SpatialEngine)
         self._record          = RecordAssessment(admin_manager)
+        self._grid            = GetResultsGrid(admin_manager, SpatialEngine)
+        self._columns         = GetResultColumns(admin_manager, SpatialEngine)
+        self._series          = GetComparisonSeries(admin_manager, SpatialEngine)
+        self._portfolio       = CreatePortfolio(admin_manager)
 
         # Keep reference for validate_assessment_name (thin query)
         self._meta = admin_manager
@@ -91,15 +99,15 @@ class AssessmentExecutor:
         try:
             result = self._create_scenario.execute(cmd)
         except ValueError as e:
-            QMessageBox.warning(parent_widget, "Cannot Create Assessment", str(e))
+            QMessageBox.warning(parent_widget, tr('executor.cannot_create_title'), str(e))
             return None
 
         layer_name = result['output_tables'][0] if result['output_tables'] else assessment_name
         QMessageBox.information(
             parent_widget,
-            "Layer Created",
-            f"Layer '{layer_name}' created successfully!\n\n"
-            f"Features: {len(list(target_layer.selectedFeatures()))}"
+            tr('executor.layer_created_title'),
+            tr('executor.layer_created_body', name=layer_name,
+               count=len(list(target_layer.selectedFeatures())))
         )
         return result
 
@@ -123,14 +131,14 @@ class AssessmentExecutor:
         try:
             result = self._apply_overlay.execute(cmd)
         except (ValueError, RuntimeError) as e:
-            QMessageBox.critical(parent_widget, "Assessment Failed", str(e))
+            QMessageBox.critical(parent_widget, tr('executor.failed_title'), str(e))
             return None
 
         layer_names = "\n• ".join(result['output_tables'])
         QMessageBox.information(
             parent_widget,
-            "Assessment Complete",
-            f"Assessment created successfully!\n\nBase layer(s):\n• {layer_names}"
+            tr('executor.complete_title'),
+            tr('executor.complete_body', tables=layer_names)
         )
         return result
 
@@ -148,14 +156,14 @@ class AssessmentExecutor:
         try:
             result = self._rerun.execute(cmd)
         except (ValueError, RuntimeError) as e:
-            QMessageBox.critical(parent_widget, "New Version Failed", str(e))
+            QMessageBox.critical(parent_widget, tr('executor.version_failed_title'), str(e))
             return None
 
         layer_names = "\n• ".join(result['output_tables'])
         QMessageBox.information(
             parent_widget,
-            "New Version Created",
-            f"New version created successfully!\n\nTable(s):\n• {layer_names}"
+            tr('executor.version_title'),
+            tr('executor.version_body', tables=layer_names)
         )
         return result
 
@@ -174,13 +182,13 @@ class AssessmentExecutor:
         try:
             result = self._rollback.execute(cmd)
         except (ValueError, RuntimeError) as e:
-            QMessageBox.critical(parent_widget, "Rollback Failed", str(e))
+            QMessageBox.critical(parent_widget, tr('executor.rollback_failed_title'), str(e))
             return None
 
         QMessageBox.information(
             parent_widget,
-            "Rollback Complete",
-            f"Restored to version {version_id}.\nTable: {result['table']}"
+            tr('executor.rollback_title'),
+            tr('executor.rollback_body', version=version_id, table=result['table'])
         )
         return result
 
@@ -200,7 +208,7 @@ class AssessmentExecutor:
         try:
             result = self._compare.execute(cmd)
         except (ValueError, RuntimeError) as e:
-            QMessageBox.critical(parent_widget, "Compare Failed", str(e))
+            QMessageBox.critical(parent_widget, tr('executor.compare_failed_title'), str(e))
             return None
 
         return result
@@ -219,15 +227,15 @@ class AssessmentExecutor:
         try:
             self._mcda.execute(cmd)
         except ValueError as e:
-            QMessageBox.warning(parent_widget, "No MCDA Config", str(e))
+            QMessageBox.warning(parent_widget, tr('executor.mcda_no_config_title'), str(e))
             return False
         except (RuntimeError, Exception) as e:
-            QMessageBox.critical(parent_widget, "MCDA Error", str(e))
+            QMessageBox.critical(parent_widget, tr('executor.mcda_error_title'), str(e))
             return False
 
         QMessageBox.information(
-            parent_widget, "MCDA Applied",
-            f"Score column computed and saved to '{table_name}'."
+            parent_widget, tr('executor.mcda_title'),
+            tr('executor.mcda_body', table=table_name)
         )
         return True
 
@@ -260,3 +268,67 @@ class AssessmentExecutor:
             self._record.execute(cmd)
         except Exception as e:
             print(f"Warning: Could not record new version metadata: {e}")
+
+    # ------------------------------------------------------------------ #
+    #  Results grid / comparison / portfolio
+    # ------------------------------------------------------------------ #
+
+    def get_results_grid(self, table_name):
+        """Per-target-feature summary of an overlay table.
+
+        Returns:
+            dict: {'table', 'columns', 'rows'}
+
+        Raises:
+            LookupError: the table is not in SpatiaLite (caller may fall back
+                         to the QGIS layer, e.g. for simple assessments).
+            ValueError / RuntimeError: not an overlay table / DB not found.
+        """
+        return self._grid.execute(
+            GetResultsGridCommand(project_db_id=self.project_db_id,
+                                  table_name=table_name)
+        )
+
+    def get_result_columns(self, table_name):
+        """Non-geometry columns of a result table (raises LookupError if missing)."""
+        return self._columns.execute(
+            GetResultsGridCommand(project_db_id=self.project_db_id,
+                                  table_name=table_name)
+        )
+
+    def get_comparison_series(self, tables, field_name):
+        """Return {label: [values]} for the paired histogram.
+
+        Raises:
+            LookupError / ValueError / RuntimeError — shown by the dialog.
+        """
+        return self._series.execute(
+            GetComparisonSeriesCommand(project_db_id=self.project_db_id,
+                                       tables=tables, field_name=field_name)
+        )
+
+    def create_portfolio(self, assessment_id, source_table, config,
+                         parent_widget=None):
+        """Validate and store a portfolio configuration (status 'pending').
+
+        Args:
+            config: dict from PortfolioWizard.get_config().
+
+        Returns:
+            dict {'portfolio_id', 'name', 'config'} or None on validation error.
+        """
+        cmd = CreatePortfolioCommand(
+            assessment_id=assessment_id,
+            source_table=source_table,
+            name=config.get('portfolio_name', ''),
+            col_benefits=config.get('col_benefits', ''),
+            col_cost=config.get('col_cost', ''),
+            col_priority=config.get('col_priority', ''),
+            budget=config.get('budget', 0.0),
+            buckets=config.get('buckets', []),
+        )
+        try:
+            return self._portfolio.execute(cmd)
+        except ValueError as e:
+            QMessageBox.warning(parent_widget, tr('main.portfolio_title'), str(e))
+            return None

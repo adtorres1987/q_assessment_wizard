@@ -10,7 +10,7 @@ No validation lives in commands — validation is the use case's responsibility.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -148,3 +148,56 @@ class RecordAssessmentCommand:
     wizard_results: dict
     project_db_id: int
     existing_assessment_id: Optional[int] = None
+
+
+@dataclass
+class GetResultsGridCommand:
+    """Command for GetResultsGrid / GetResultColumns (read-only).
+
+    Attributes:
+        project_db_id:  Project primary key (locates the SpatiaLite DB).
+        table_name:     Overlay output table (e.g. proj__assess__v2).
+    """
+    project_db_id: int
+    table_name: str
+
+
+@dataclass
+class GetComparisonSeriesCommand:
+    """Command for the GetComparisonSeries use case (read-only).
+
+    Attributes:
+        project_db_id:  Project primary key.
+        tables:         Ordered mapping display label -> overlay table name.
+        field_name:     Aggregated field to compare (see result_queries).
+    """
+    project_db_id: int
+    tables: Dict[str, str]
+    field_name: str
+
+
+@dataclass
+class CreatePortfolioCommand:
+    """Command for the CreatePortfolio use case.
+
+    Stores a Portfolio (LPA) configuration built on one overlay result.
+    No optimisation is run — the portfolio is saved with status 'pending'.
+
+    Attributes:
+        assessment_id:  Assessment that owns the source result.
+        source_table:   Overlay output table the columns come from.
+        name:           Portfolio name (unique per assessment).
+        col_benefits:   Column holding the benefit of each unit.
+        col_cost:       Column holding the cost of each unit.
+        col_priority:   Column used for prioritisation.
+        budget:         Total budget (>= 0).
+        buckets:        Optional budget split: [{'name': str, 'amount': float}].
+    """
+    assessment_id: int
+    source_table: str
+    name: str
+    col_benefits: str
+    col_cost: str
+    col_priority: str
+    budget: float
+    buckets: List[dict] = field(default_factory=list)

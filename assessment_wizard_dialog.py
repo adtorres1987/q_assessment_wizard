@@ -37,9 +37,11 @@ from qgis.gui import QgsMapCanvas, QgsMapToolPan
 # Extracted modules (SOLID refactoring)
 from .map_tools import FeatureSelectionTool, RectangleSelectTool
 from .geometry_utils import (transform_extent_to_canvas_crs,
+                              choose_canvas_crs,
                               get_assessment_summary)
 from .layer_migration import LayerMigrationService
 from .assessment_executor import AssessmentExecutor
+from .translator import tr
 
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -48,7 +50,8 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
-    # Layer status constants
+    # Layer status keys — stored as the status combos' item data (language
+    # independent); the visible text is translated (see _status_items).
     STATUS_INCLUDE = "Include in assessment"
     STATUS_TARGET = "Include as Target"
     STATUS_SPATIAL_MARKER = "Spatial Marker"
@@ -78,10 +81,70 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         self.initialize_page_1()
         self.initialize_page_2()
         self.initialize_page_3()
+        self.retranslateUi()
 
     # ------------------------------------------------------------------ #
     #  Status constants helper
     # ------------------------------------------------------------------ #
+
+    def _status_items(self):
+        """(key, translated label) pairs for the layer status combos."""
+        return [
+            (self.STATUS_DO_NOT_INCLUDE, tr('dialog.status_do_not_include')),
+            (self.STATUS_INCLUDE,        tr('dialog.status_include')),
+            (self.STATUS_TARGET,         tr('dialog.status_target')),
+            (self.STATUS_SPATIAL_MARKER, tr('dialog.status_spatial_marker')),
+        ]
+
+    def _make_status_combo(self):
+        combo = QComboBox()
+        for key, label in self._status_items():
+            combo.addItem(label, key)
+        combo.currentIndexChanged.connect(self.on_status_changed)
+        return combo
+
+    @staticmethod
+    def _status_of(combo):
+        """Language-independent status key of a status combo."""
+        return combo.currentData() or combo.currentText()
+
+    @staticmethod
+    def _set_status(combo, status):
+        idx = combo.findData(status)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def retranslateUi(self, _form=None):
+        """Apply every static text of the wizard in the active language."""
+        self.setWindowTitle(tr('dialog.window_title'))
+        self.page_1.setTitle(tr('dialog.page1_title'))
+        self.page_1.setSubTitle(tr('dialog.page1_subtitle'))
+        self.label_name.setText(tr('dialog.lbl_name'))
+        self.lineEdit_name.setPlaceholderText(tr('dialog.placeholder_name'))
+        self.label_description.setText(tr('dialog.lbl_description'))
+        self.textEdit_description.setPlaceholderText(tr('dialog.placeholder_description'))
+        self.label_layers.setText(tr('dialog.lbl_layers'))
+        self.tableWidget_layers.setToolTip(tr('dialog.tbl_tooltip'))
+        headers = [tr('dialog.tbl_col_layer'), tr('dialog.tbl_col_geometry'),
+                   tr('dialog.tbl_col_status')]
+        for col, text in enumerate(headers):
+            item = self.tableWidget_layers.horizontalHeaderItem(col)
+            if item:
+                item.setText(text)
+        self.page_2.setTitle(tr('dialog.page2_title'))
+        self.page_2.setSubTitle(tr('dialog.page2_subtitle'))
+        self.pushButton_select_all.setText(tr('dialog.btn_select_all'))
+        self.pushButton_clear_selection.setText(tr('dialog.btn_clear_selection'))
+        self.page_3.setTitle(tr('dialog.page3_title'))
+        self.page_3.setSubTitle(tr('dialog.page3_subtitle'))
+        self.label_summary_header.setText(f"<h3>{tr('dialog.lbl_summary_header')}</h3>")
+        self.groupBox_basic_info.setTitle(tr('dialog.grp_basic_info'))
+        self.label_summary_name_label.setText(tr('dialog.lbl_assess_name'))
+        self.label_summary_description_label.setText(tr('dialog.lbl_description'))
+        self.label_summary_features_label.setText(tr('dialog.lbl_selected_features_lbl'))
+        self.label_complexity_label.setText(tr('dialog.lbl_complexity'))
+        self.groupBox_layers.setTitle(tr('dialog.grp_layers'))
+        self.groupBox_selected_features_map.setTitle(tr('dialog.grp_features_map'))
+        self.tableWidget_summary_layers.setHorizontalHeaderLabels(headers)
 
     def _status_constants(self):
         """Return status constants as a dict for external modules."""
@@ -108,7 +171,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             status_combo = self.tableWidget_layers.cellWidget(row, 2)
 
             if layer_name_item and status_combo:
-                if status_combo.currentText() != self.STATUS_DO_NOT_INCLUDE:
+                if self._status_of(status_combo) != self.STATUS_DO_NOT_INCLUDE:
                     layer_name = layer_name_item.text()
                     layers = QgsProject.instance().mapLayersByName(layer_name)
                     if layers and isinstance(layers[0], QgsVectorLayer):
@@ -131,7 +194,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
             if layer_name_item and status_combo:
                 layer_name = layer_name_item.text()
-                status = status_combo.currentText()
+                status = self._status_of(status_combo)
 
                 layers = QgsProject.instance().mapLayersByName(layer_name)
                 if layers and isinstance(layers[0], QgsVectorLayer):
@@ -165,9 +228,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             if not executor.validate_assessment_name(assessment_name):
                 QMessageBox.warning(
                     self,
-                    "Duplicate Assessment",
-                    f"An assessment named '{assessment_name}' already exists in this project.\n\n"
-                    "Please go back and choose a different name."
+                    tr('dialog.dup_title'),
+                    tr('dialog.dup_body', name=assessment_name)
                 )
                 return
 
@@ -176,19 +238,19 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         if not target_layer:
             QMessageBox.warning(
                 self,
-                "Analysis Error",
-                "No target layer selected. Please select a layer as 'Include as Target'."
+                tr('dialog.err_analysis_title'),
+                tr('dialog.err_analysis_no_target')
             )
             return
 
         try:
             # Show progress dialog
             progress = QProgressDialog(
-                "Operation and analysis in progress...",
+                tr('dialog.prog_analysis'),
                 None, 0, 0, self
             )
-            progress.setWindowTitle("Processing")
-            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle(tr('dialog.prog_processing'))
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(0)
             progress.show()
             QCoreApplication.processEvents()
@@ -222,8 +284,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             progress.close()
             QMessageBox.critical(
                 self,
-                "Analysis Error",
-                f"Spatial analysis failed:\n{str(e)}"
+                tr('dialog.err_analysis_title'),
+                tr('dialog.err_analysis_failed', error=str(e))
             )
 
     def get_results(self):
@@ -251,7 +313,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         for row in range(self.tableWidget_layers.rowCount()):
             combo = self.tableWidget_layers.cellWidget(row, 2)
             if combo:
-                combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
+                self._set_status(combo, self.STATUS_DO_NOT_INCLUDE)
 
         self.target_layer = None
 
@@ -287,13 +349,12 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Assessment Already Exists",
-            f"An assessment named '{assessment_name}' already exists.\n\n"
-            "Do you want to create a new version (v2+)?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No
+            tr('dialog.exists_title'),
+            tr('dialog.exists_body', name=assessment_name),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
         )
-        if reply == QtWidgets.QMessageBox.Yes:
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             self._creating_new_version = True
             assessments = self.admin_manager.get_assessments_for_project(
                 self.project_db_id
@@ -322,9 +383,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         if not base_layers_group:
             QMessageBox.warning(
                 self,
-                "Base Layers Not Found",
-                "No 'Base Layers' group folder found in the Layers panel.\n\n"
-                "Please create a group called 'Base Layers' and add your input layers to it."
+                tr('dialog.no_base_group_title'),
+                tr('dialog.no_base_group_body')
             )
             return
 
@@ -349,14 +409,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.tableWidget_layers.setItem(row_position, 1, geometry_item)
 
             # Column 2: Status dropdown
-            status_combo = QComboBox()
-            status_combo.addItems([
-                self.STATUS_DO_NOT_INCLUDE,
-                self.STATUS_INCLUDE,
-                self.STATUS_TARGET,
-                self.STATUS_SPATIAL_MARKER
-            ])
-            status_combo.currentTextChanged.connect(self.on_status_changed)
+            status_combo = self._make_status_combo()
             self.tableWidget_layers.setCellWidget(row_position, 2, status_combo)
 
         self.tableWidget_layers.resizeColumnsToContents()
@@ -391,34 +444,27 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             geom_item.setBackground(light_blue)
             self.tableWidget_layers.setItem(row, 1, geom_item)
 
-            status_combo = QComboBox()
-            status_combo.addItems([
-                self.STATUS_DO_NOT_INCLUDE,
-                self.STATUS_INCLUDE,
-                self.STATUS_TARGET,
-                self.STATUS_SPATIAL_MARKER,
-            ])
-            status_combo.currentTextChanged.connect(self.on_status_changed)
+            status_combo = self._make_status_combo()
             self.tableWidget_layers.setCellWidget(row, 2, status_combo)
 
         self.tableWidget_layers.resizeColumnsToContents()
 
-    def on_status_changed(self, text):
+    def on_status_changed(self, _index=None):
         """Handle status change to ensure only one layer is set as Target."""
-        if text == self.STATUS_TARGET:
-            sender = self.sender()
+        sender = self.sender()
+        if isinstance(sender, QComboBox) and self._status_of(sender) == self.STATUS_TARGET:
             for row in range(self.tableWidget_layers.rowCount()):
                 combo = self.tableWidget_layers.cellWidget(row, 2)
-                if combo and combo != sender and combo.currentText() == self.STATUS_TARGET:
-                    combo.setCurrentText(self.STATUS_DO_NOT_INCLUDE)
+                if combo and combo is not sender and self._status_of(combo) == self.STATUS_TARGET:
+                    self._set_status(combo, self.STATUS_DO_NOT_INCLUDE)
 
     def validate_page_1(self):
         """Validate page 1 before allowing user to proceed."""
         if not self.lineEdit_name.text().strip():
             QtWidgets.QMessageBox.warning(
                 self,
-                "Validation Error",
-                "Please enter an assessment name before proceeding."
+                tr('dialog.val_title'),
+                tr('dialog.val_name_required')
             )
             return False
 
@@ -426,21 +472,21 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         target_count = 0
         for row in range(self.tableWidget_layers.rowCount()):
             combo = self.tableWidget_layers.cellWidget(row, 2)
-            if combo and combo.currentText() == self.STATUS_TARGET:
+            if combo and self._status_of(combo) == self.STATUS_TARGET:
                 target_count += 1
 
         if target_count == 0:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Validation Error",
-                "Please select exactly one layer as 'Include as Target' before proceeding."
+                tr('dialog.val_title'),
+                tr('dialog.val_no_target')
             )
             return False
         elif target_count > 1:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Validation Error",
-                "Only one layer can be set as 'Include as Target'. Please check your selections."
+                tr('dialog.val_title'),
+                tr('dialog.val_multi_target')
             )
             return False
 
@@ -455,7 +501,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
             if layer_name_item and combo:
                 layer_name = layer_name_item.text()
-                status = combo.currentText()
+                status = self._status_of(combo)
 
                 layers = QgsProject.instance().mapLayersByName(layer_name)
                 if layers:
@@ -478,18 +524,17 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
                             QtWidgets.QMessageBox.warning(
                                 self,
-                                "Validation Error",
-                                f"Assessment layer '{assessment_name}' has geometry type '{assessment_type_name}', "
-                                f"but Target layer '{target_layer_name}' has geometry type '{target_type_name}'.\n\n"
-                                f"All selected layers must have the same geometry type."
+                                tr('dialog.val_title'),
+                                tr('dialog.val_geom_mismatch',
+                                   assess=assessment_name, assess_type=assessment_type_name,
+                                   target=target_layer_name, target_type=target_type_name)
                             )
                             return False
                     else:
                         QtWidgets.QMessageBox.warning(
                             self,
-                            "Validation Error",
-                            f"Assessment layer '{assessment_name}' is not a vector layer.\n\n"
-                            f"Only vector layers can be used."
+                            tr('dialog.val_title'),
+                            tr('dialog.val_not_vector', assess=assessment_name)
                         )
                         return False
 
@@ -507,7 +552,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         for row in range(self.tableWidget_layers.rowCount()):
             layer_name = self.tableWidget_layers.item(row, 0).text()
             combo = self.tableWidget_layers.cellWidget(row, 2)
-            status = combo.currentText() if combo else self.STATUS_DO_NOT_INCLUDE
+            status = self._status_of(combo) if combo else self.STATUS_DO_NOT_INCLUDE
 
             configurations.append({
                 'layer_name': layer_name,
@@ -544,24 +589,26 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         if not self.target_layer:
             QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "No target layer found. Please go back and select a target layer."
+                self, tr('dialog.err_no_target_title'),
+                tr('dialog.err_no_target_body')
             )
             return
 
         if not isinstance(self.target_layer, QgsVectorLayer):
             QtWidgets.QMessageBox.warning(
-                self, "Error",
-                "The target layer must be a vector layer. Raster layers are not supported."
+                self, tr('dialog.err_not_vector_title'),
+                tr('dialog.err_not_vector_body')
             )
             return
 
-        self.label_target_layer_name.setText(f"Target Layer: {self.target_layer.name()}")
+        self.label_target_layer_name.setText(
+            tr('dialog.lbl_target_layer', name=self.target_layer.name())
+        )
 
         # Create map canvas if it doesn't exist
         if not self.map_canvas:
             self.map_canvas = QgsMapCanvas(self.map_canvas_container)
-            self.map_canvas.setCanvasColor(Qt.white)
+            self.map_canvas.setCanvasColor(Qt.GlobalColor.white)
             self.map_canvas.setMinimumSize(400, 400)
             self.map_canvas.resize(800, 600)
 
@@ -569,24 +616,24 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.map_toolbar = QToolBar()
             self.map_toolbar.setIconSize(QSize(16, 16))
 
-            self.zoom_in_button = QPushButton("Zoom In")
+            self.zoom_in_button = QPushButton(tr('dialog.btn_zoom_in'))
             self.zoom_in_button.clicked.connect(self.zoom_in)
             self.map_toolbar.addWidget(self.zoom_in_button)
 
-            self.zoom_out_button = QPushButton("Zoom Out")
+            self.zoom_out_button = QPushButton(tr('dialog.btn_zoom_out'))
             self.zoom_out_button.clicked.connect(self.zoom_out)
             self.map_toolbar.addWidget(self.zoom_out_button)
 
-            self.zoom_full_button = QPushButton("Zoom to Layer")
+            self.zoom_full_button = QPushButton(tr('dialog.btn_zoom_layer'))
             self.zoom_full_button.clicked.connect(self.zoom_to_layer)
             self.map_toolbar.addWidget(self.zoom_full_button)
 
-            self.pan_button = QPushButton("Pan")
+            self.pan_button = QPushButton(tr('dialog.btn_pan'))
             self.pan_button.setCheckable(True)
             self.pan_button.clicked.connect(self.toggle_pan)
             self.map_toolbar.addWidget(self.pan_button)
 
-            self.rect_select_button = QPushButton("Rectangle Select")
+            self.rect_select_button = QPushButton(tr('dialog.btn_rect_select'))
             self.rect_select_button.setCheckable(True)
             self.rect_select_button.clicked.connect(self.toggle_rectangle_select)
             self.map_toolbar.addWidget(self.rect_select_button)
@@ -601,10 +648,17 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             self.map_canvas.show()
             self.map_canvas_container.show()
 
-        # Setup map with target layer and OpenStreetMap
-        osm_layer = self.create_osm_layer()
-
-        self.map_canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        # Setup map with target layer and OpenStreetMap (only when the layer
+        # can be reprojected to Web Mercator; otherwise draw in its own CRS).
+        canvas_crs, use_basemap = choose_canvas_crs(self.target_layer)
+        self.map_canvas.setDestinationCrs(canvas_crs)
+        osm_layer = self.create_osm_layer() if use_basemap else None
+        if not use_basemap:
+            crs_label = self.target_layer.crs().authid() or tr('dialog.crs_none')
+            self.label_target_layer_name.setText(tr(
+                'dialog.lbl_target_no_basemap',
+                name=self.target_layer.name(), crs=crs_label,
+            ))
 
         layers_to_display = [self.target_layer]
         if osm_layer and osm_layer.isValid():
@@ -617,7 +671,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         extent = transform_extent_to_canvas_crs(self.map_canvas, self.target_layer)
         self.map_canvas.setExtent(extent)
 
-        self.map_canvas.setCanvasColor(Qt.white)
+        self.map_canvas.setCanvasColor(Qt.GlobalColor.white)
         self.map_canvas.setRenderFlag(True)
         self.map_canvas.show()
         self.map_canvas_container.show()
@@ -659,7 +713,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Get the layer marked as 'Include as Target' from page 1."""
         for row in range(self.tableWidget_layers.rowCount()):
             combo = self.tableWidget_layers.cellWidget(row, 2)
-            if combo and combo.currentText() == self.STATUS_TARGET:
+            if combo and self._status_of(combo) == self.STATUS_TARGET:
                 layer_name = self.tableWidget_layers.item(row, 0).text()
                 layers = QgsProject.instance().mapLayersByName(layer_name)
                 if layers:
@@ -682,7 +736,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Update the label showing the number of selected features."""
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             count = self.target_layer.selectedFeatureCount()
-            self.label_selection_count.setText(f"Selected: {count} features")
+            self.label_selection_count.setText(tr('dialog.lbl_selected_count', count=count))
             if self.map_canvas:
                 self.map_canvas.refresh()
 
@@ -690,15 +744,15 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Validate page 2 before allowing user to proceed."""
         if not self.target_layer:
             QtWidgets.QMessageBox.warning(
-                self, "Validation Error",
-                "No target layer is available."
+                self, tr('dialog.val_title'),
+                tr('dialog.val_no_target_available')
             )
             return False
 
         if self.target_layer.selectedFeatureCount() == 0:
             QtWidgets.QMessageBox.warning(
-                self, "Validation Error",
-                "Please select at least one feature before proceeding."
+                self, tr('dialog.val_title'),
+                tr('dialog.val_no_features')
             )
             return False
 
@@ -753,7 +807,8 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         """Initialize the third wizard page."""
         self.tableWidget_summary_layers.setColumnCount(3)
         self.tableWidget_summary_layers.setHorizontalHeaderLabels(
-            ["Layer Name", "Geometry Type", "Status"]
+            [tr('dialog.tbl_col_layer'), tr('dialog.tbl_col_geometry'),
+             tr('dialog.tbl_col_status')]
         )
         self.tableWidget_summary_layers.horizontalHeader().setStretchLastSection(True)
 
@@ -764,7 +819,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         self.label_summary_name.setText(assessment_name)
         self.label_summary_description.setText(
-            assessment_description if assessment_description else "No description provided"
+            assessment_description if assessment_description else tr('dialog.lbl_no_description')
         )
 
         # Get assessment summary using extracted utility
@@ -776,9 +831,11 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Selected feature count
         if self.target_layer and isinstance(self.target_layer, QgsVectorLayer):
             feature_count = self.target_layer.selectedFeatureCount()
-            self.label_summary_features.setText(f"{feature_count} features selected")
+            self.label_summary_features.setText(
+                tr('dialog.lbl_features_selected', count=feature_count)
+            )
         else:
-            self.label_summary_features.setText("0 features selected")
+            self.label_summary_features.setText(tr('dialog.lbl_features_selected', count=0))
 
         # Populate layers summary table
         self.tableWidget_summary_layers.setRowCount(0)
@@ -790,7 +847,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
             status_combo = self.tableWidget_layers.cellWidget(table_row, 2)
 
             if layer_name_item and status_combo:
-                status = status_combo.currentText()
+                status = self._status_of(status_combo)
 
                 if status != self.STATUS_DO_NOT_INCLUDE:
                     self.tableWidget_summary_layers.insertRow(row)
@@ -803,13 +860,13 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                     )
                     self.tableWidget_summary_layers.setItem(row, 1, geometry_item)
 
-                    status_item = QTableWidgetItem(status)
+                    status_item = QTableWidgetItem(status_combo.currentText())
                     self.tableWidget_summary_layers.setItem(row, 2, status_item)
 
                     if status == self.STATUS_TARGET:
-                        name_item.setBackground(Qt.gray)
-                        geometry_item.setBackground(Qt.gray)
-                        status_item.setBackground(Qt.gray)
+                        name_item.setBackground(Qt.GlobalColor.gray)
+                        geometry_item.setBackground(Qt.GlobalColor.gray)
+                        status_item.setBackground(Qt.GlobalColor.gray)
 
                     row += 1
 
@@ -818,7 +875,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
         # Setup map canvas for page 3
         if not self.map_canvas_page3:
             self.map_canvas_page3 = QgsMapCanvas(self.widget_map_container_page3)
-            self.map_canvas_page3.setCanvasColor(Qt.white)
+            self.map_canvas_page3.setCanvasColor(Qt.GlobalColor.white)
             self.map_canvas_page3.setMinimumSize(400, 400)
             self.map_canvas_page3.resize(800, 400)
 
@@ -839,10 +896,9 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
 
         # Display the selected features layer
         if self.selected_features_layer and self.selected_features_layer.isValid():
-            osm_layer = self.create_osm_layer()
-            self.map_canvas_page3.setDestinationCrs(
-                QgsCoordinateReferenceSystem("EPSG:3857")
-            )
+            canvas_crs, use_basemap = choose_canvas_crs(self.selected_features_layer)
+            self.map_canvas_page3.setDestinationCrs(canvas_crs)
+            osm_layer = self.create_osm_layer() if use_basemap else None
 
             # Get assessment layers for display
             assessment_layers = []
@@ -851,7 +907,7 @@ class QassessmentWizardDialog(QtWidgets.QWizard, FORM_CLASS):
                 status_combo = self.tableWidget_layers.cellWidget(table_row, 2)
 
                 if layer_name_item and status_combo:
-                    if status_combo.currentText() == self.STATUS_INCLUDE:
+                    if self._status_of(status_combo) == self.STATUS_INCLUDE:
                         layer_name = layer_name_item.text()
                         layers = QgsProject.instance().mapLayersByName(layer_name)
                         if layers and isinstance(layers[0], QgsVectorLayer):

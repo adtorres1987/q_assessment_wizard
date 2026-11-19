@@ -21,7 +21,7 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, QT_VERSION
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QDockWidget
 
@@ -29,6 +29,7 @@ from qgis.PyQt.QtWidgets import QAction, QDockWidget
 from .resources import *
 # Import the code for the main form
 from .main_form import AssessmentMainForm
+from .translator import tr
 import os.path
 
 
@@ -48,7 +49,7 @@ class QassessmentWizard:
         # initialize plugin directory
         self.plugin_dir = os.path.dirname(__file__)
         # initialize locale
-        locale = QSettings().value('locale/userLocale')[0:2]
+        locale = (QSettings().value('locale/userLocale') or 'en')[0:2]
         locale_path = os.path.join(
             self.plugin_dir,
             'i18n',
@@ -61,9 +62,11 @@ class QassessmentWizard:
 
         # Declare instance attributes
         self.actions = []
-        self.menu = self.tr(u'&Assessment Wizard')
+        # Fixed at load time: unload() must remove the menu under the same name.
+        self.menu = tr('main.menu')
         self.dock = None
         self.main_form = None
+        self._restore_dock_animation = False
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -159,30 +162,39 @@ class QassessmentWizard:
         """Create the menu entries, toolbar icon and dock panel."""
 
         icon_path = ':/plugins/assessment_wizard/icon.png'
-        self.add_action(
+        self.explorer_action = self.add_action(
             icon_path,
-            text=self.tr(u'EMDS Explorer'),
+            text=tr('main.action_explorer'),
             callback=self.run,
             parent=self.iface.mainWindow())
+
+        # Workaround for a Qt 6 bug (seen with QGIS 4.0.3 / Qt 6.9.3): dragging
+        # any dock widget while QMainWindow dock animations are enabled can
+        # segfault in QWidgetAnimator::animate (null QVariantAnimation). With
+        # animations off, docks snap into place instead and the crash is
+        # avoided. The previous setting is restored in unload().
+        main_window = self.iface.mainWindow()
+        if QT_VERSION >= 0x060000 and main_window.isAnimated():
+            main_window.setAnimated(False)
+            self._restore_dock_animation = True
 
         # Create the dock panel once — persists for the entire QGIS session.
         self.main_form = AssessmentMainForm(
             iface=self.iface,
             plugin_dir=self.plugin_dir,
         )
-        self.dock = QDockWidget(self.tr("EMDS – Project Explorer"), self.iface.mainWindow())
+        self.main_form.language_changed.connect(self._on_language_changed)
+        self.dock = QDockWidget(tr('main.dock_title'), self.iface.mainWindow())
         self.dock.setObjectName("EMDSProjectExplorerDock")  # for QGIS state persistence
         self.dock.setWidget(self.main_form)
-        self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
         self.dock.hide()  # hidden by default; shown on first toolbar click
 
 
     def unload(self):
         """Removes the plugin menu item, toolbar icon and dock panel."""
         for action in self.actions:
-            self.iface.removePluginMenu(
-                self.tr(u'&Assessment Wizard'),
-                action)
+            self.iface.removePluginMenu(self.menu, action)
             self.iface.removeToolBarIcon(action)
 
         if self.dock is not None:
@@ -193,6 +205,16 @@ class QassessmentWizard:
             self.dock = None
             self.main_form = None
 
+        if self._restore_dock_animation:
+            self.iface.mainWindow().setAnimated(True)
+            self._restore_dock_animation = False
+
+
+    def _on_language_changed(self, _code):
+        """Re-translate the toolbar action and dock title (menu name stays fixed)."""
+        self.explorer_action.setText(tr('main.action_explorer'))
+        if self.dock is not None:
+            self.dock.setWindowTitle(tr('main.dock_title'))
 
     def run(self):
         """Toggle the EMDS Project Explorer dock panel."""
