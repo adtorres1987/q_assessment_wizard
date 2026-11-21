@@ -1,0 +1,7 @@
+# Keep development-only files out of `git archive` plugin ZIPs
+# (gitattributes needs dir/** — a trailing-slash pattern does not match the files inside)
+tests/** export-ignore
+tools/** export-ignore
+.vscode/** export-ignore
+CLAUDE.md export-ignore
+.gitattributes export-ignore
