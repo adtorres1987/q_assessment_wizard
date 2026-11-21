@@ -49,6 +49,14 @@ class SpatialEnginePort(Protocol):
 
     def drop_table(self, table_name: str): ...
 
+    def table_exists(self, table_name: str) -> bool: ...
+
+    def migrate_layers(self, layers: dict, progress_callback=None) -> List[dict]:
+        """Migrate (overwrite) QGIS layers; one stats dict per layer
+        ({'table_name', 'inserted', 'errors'} or {'table_name', 'error'}).
+        OperationCancelled raised by the callback must propagate."""
+        ...
+
     # Read-only result queries (results grid / comparison histogram).
     # Raise LookupError if the table is missing, ValueError if it is not an
     # overlay output.

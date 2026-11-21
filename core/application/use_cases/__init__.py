@@ -12,6 +12,13 @@ from .commands import (
     GetResultsGridCommand,
     GetComparisonSeriesCommand,
     CreatePortfolioCommand,
+    MigrateLayersCommand,
+    CreateProjectCommand,
+    DeleteProjectCommand,
+    DeleteAssessmentCommand,
+    DeletePortfolioCommand,
+    SetLayerVisibilityCommand,
+    UpdateWeightsCommand,
 )
 from .create_scenario import CreateScenario
 from .apply_overlay import ApplyOverlay
@@ -22,6 +29,15 @@ from .apply_mcda_score import ApplyMcdaScore
 from .record_assessment import RecordAssessment
 from .query_results import GetResultsGrid, GetResultColumns, GetComparisonSeries
 from .create_portfolio import CreatePortfolio
+from .migrate_layers import FindExistingLayers, MigrateLayers
+from .manage_catalog import (
+    CreateProject, DeleteProject, DeleteAssessment, DeletePortfolio,
+    SetLayerVisibility, UpdateWeights,
+)
+from .explorer_queries import (
+    GetProjectTree, GetProjectSummary, GetAssessmentDetails, GetAnalysisWeights,
+    GetWeightsConfig, GetPortfolio, FindAssessmentId,
+)
 
 __all__ = [
     'CreateScenarioCommand',
@@ -34,6 +50,9 @@ __all__ = [
     'GetResultsGridCommand',
     'GetComparisonSeriesCommand',
     'CreatePortfolioCommand',
+    'MigrateLayersCommand',
+    'CreateProjectCommand', 'DeleteProjectCommand', 'DeleteAssessmentCommand',
+    'DeletePortfolioCommand', 'SetLayerVisibilityCommand', 'UpdateWeightsCommand',
     'CreateScenario',
     'ApplyOverlay',
     'RollbackVersion',
@@ -45,4 +64,10 @@ __all__ = [
     'GetResultColumns',
     'GetComparisonSeries',
     'CreatePortfolio',
+    'FindExistingLayers',
+    'MigrateLayers',
+    'CreateProject', 'DeleteProject', 'DeleteAssessment', 'DeletePortfolio',
+    'SetLayerVisibility', 'UpdateWeights',
+    'GetProjectTree', 'GetProjectSummary', 'GetAssessmentDetails', 'GetAnalysisWeights',
+    'GetWeightsConfig', 'GetPortfolio', 'FindAssessmentId',
 ]

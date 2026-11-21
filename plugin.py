@@ -21,16 +21,16 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, QT_VERSION
+import os.path
+
+from qgis.PyQt.QtCore import Qt, QT_VERSION
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QDockWidget
 
-# Initialize Qt resources from file resources.py
-from .resources import *
-# Import the code for the main form
-from .main_form import AssessmentMainForm
-from .translator import tr
-import os.path
+from .core.infrastructure.persistence.admin_manager import AdminManager
+from .ui.explorer_facade import ExplorerFacade
+from .ui.main_panel import AssessmentMainForm
+from .ui.i18n.translator import tr
 
 
 class QassessmentWizard:
@@ -48,17 +48,7 @@ class QassessmentWizard:
         self.iface = iface
         # initialize plugin directory
         self.plugin_dir = os.path.dirname(__file__)
-        # initialize locale
-        locale = (QSettings().value('locale/userLocale') or 'en')[0:2]
-        locale_path = os.path.join(
-            self.plugin_dir,
-            'i18n',
-            'QassessmentWizard_{}.qm'.format(locale))
-
-        if os.path.exists(locale_path):
-            self.translator = QTranslator()
-            self.translator.load(locale_path)
-            QCoreApplication.installTranslator(self.translator)
+        # UI language is handled by translator.py (translations/*.json).
 
         # Declare instance attributes
         self.actions = []
@@ -66,23 +56,8 @@ class QassessmentWizard:
         self.menu = tr('main.menu')
         self.dock = None
         self.main_form = None
+        self.admin_manager = None
         self._restore_dock_animation = False
-
-    # noinspection PyMethodMayBeStatic
-    def tr(self, message):
-        """Get the translation for a string using Qt translation API.
-
-        We implement this ourselves since we do not inherit QObject.
-
-        :param message: String for translation.
-        :type message: str, QString
-
-        :returns: Translated version of message.
-        :rtype: QString
-        """
-        # noinspection PyTypeChecker,PyArgumentList,PyCallByClass
-        return QCoreApplication.translate('QassessmentWizard', message)
-
 
     def add_action(
         self,
@@ -98,7 +73,7 @@ class QassessmentWizard:
         """Add a toolbar icon to the toolbar.
 
         :param icon_path: Path to the icon for this action. Can be a resource
-            path (e.g. ':/plugins/foo/bar.png') or a normal file system path.
+            file system path (e.g. os.path.join(self.plugin_dir, 'icon.png')).
         :type icon_path: str
 
         :param text: Text that should be shown in menu items for this action.
@@ -161,7 +136,7 @@ class QassessmentWizard:
     def initGui(self):
         """Create the menu entries, toolbar icon and dock panel."""
 
-        icon_path = ':/plugins/assessment_wizard/icon.png'
+        icon_path = os.path.join(self.plugin_dir, 'icon.png')
         self.explorer_action = self.add_action(
             icon_path,
             text=tr('main.action_explorer'),
@@ -178,10 +153,16 @@ class QassessmentWizard:
             main_window.setAnimated(False)
             self._restore_dock_animation = True
 
+        # Composition root: the metadata repository lives for the whole QGIS
+        # session; the UI only sees it through ExplorerFacade / executors.
+        self.admin_manager = AdminManager(self.plugin_dir)
+        self.admin_manager.connect()
+        _import_legacy_metadata(self.admin_manager, self.plugin_dir)
+
         # Create the dock panel once — persists for the entire QGIS session.
         self.main_form = AssessmentMainForm(
             iface=self.iface,
-            plugin_dir=self.plugin_dir,
+            facade=ExplorerFacade(self.admin_manager),
         )
         self.main_form.language_changed.connect(self._on_language_changed)
         self.dock = QDockWidget(tr('main.dock_title'), self.iface.mainWindow())
@@ -199,11 +180,13 @@ class QassessmentWizard:
 
         if self.dock is not None:
             self.iface.removeDockWidget(self.dock)
-            if self.main_form is not None:
-                self.main_form.admin_manager.disconnect()
             self.dock.deleteLater()
             self.dock = None
             self.main_form = None
+
+        if self.admin_manager is not None:
+            self.admin_manager.disconnect()
+            self.admin_manager = None
 
         if self._restore_dock_animation:
             self.iface.mainWindow().setAnimated(True)
@@ -225,3 +208,19 @@ class QassessmentWizard:
         else:
             self.dock.show()
             self.dock.raise_()
+
+
+def _import_legacy_metadata(admin_manager, plugin_dir):
+    """One-off import of a pre-admin.sqlite ``metadata.db`` (renamed to .bak)."""
+    old_metadata_path = os.path.join(plugin_dir, "metadata.db")
+    if not os.path.exists(old_metadata_path):
+        return
+    try:
+        stats = admin_manager.migrate_from_metadata_db(old_metadata_path)
+        if stats['projects_migrated'] > 0 or stats['assessments_migrated'] > 0:
+            print(f"Migrated {stats['projects_migrated']} projects and "
+                  f"{stats['assessments_migrated']} assessments from metadata.db")
+        os.rename(old_metadata_path, old_metadata_path + ".bak")
+    except Exception as e:
+        print(f"Warning: Migration from metadata.db failed: {e}")
+

@@ -13,10 +13,10 @@ Raises:
 """
 
 import json
-import re
 
 from .commands import ApplyMcdaScoreCommand
-from ..ports import MetadataRepositoryPort
+from ..ports import MetadataRepositoryPort, MapLayersPort
+from ...domain.rules.naming import strip_version
 
 
 class ApplyMcdaScore:
@@ -25,12 +25,15 @@ class ApplyMcdaScore:
     Args:
         metadata_repo:        MetadataRepositoryPort implementation.
         spatial_engine_class: The SpatialEngine class (context manager factory).
+        map_layers:           MapLayersPort (optional) — reloads the scored
+                              table's layers on the map.
     """
 
     def __init__(self, metadata_repo: MetadataRepositoryPort,
-                 spatial_engine_class):
+                 spatial_engine_class, map_layers: MapLayersPort = None):
         self._meta = metadata_repo
         self._engine_cls = spatial_engine_class
+        self._map = map_layers
 
     def execute(self, cmd: ApplyMcdaScoreCommand) -> bool:
         """Execute MCDA scoring.
@@ -60,14 +63,12 @@ class ApplyMcdaScore:
         with self._engine_cls(project_db_path) as engine:
             engine.score_table(cmd.table_name, score_column, matched_weight)
 
-        # Refresh any QGIS layer currently displaying this table
-        try:
-            from qgis.core import QgsProject
-            for layer in QgsProject.instance().mapLayers().values():
-                if cmd.table_name in (layer.name() or ''):
-                    layer.reload()
-        except Exception:
-            pass
+        # Refresh any map layer currently displaying this table
+        if self._map is not None:
+            try:
+                self._map.reload_layers_showing(cmd.table_name)
+            except Exception:
+                pass
 
         return True
 
@@ -78,7 +79,7 @@ class ApplyMcdaScore:
         Tries to match the table name suffix against layer names; falls back
         to the first (and only) weight for single-layer assessments.
         """
-        base_no_ver = re.sub(r'__v\d+$', '', table_name)
+        base_no_ver = strip_version(table_name)
         for layer_name, w in weights.items():
             safe = layer_name.replace(' ', '_')
             if base_no_ver.endswith(f'_{safe}'):

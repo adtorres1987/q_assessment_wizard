@@ -15,6 +15,8 @@ Raises:
                  unknown field was requested.
 """
 
+from ...domain.rules import coverage
+
 _GEOMETRY_COLUMNS = {"geom", "geometry"}
 _REQUIRED_COLUMNS = {"input_id", "split_type", "shape_area"}
 
@@ -68,20 +70,21 @@ def coverage_summary(conn, table):
     columns = _require_overlay(conn, table)
     score_col = next((c for c in columns if c.lower() == "mcda_score"), None)
 
-    coverage = f"{_INTERSECT} * 100.0 / NULLIF(SUM(shape_area), 0)"
+    pct = f"{_INTERSECT} * 100.0 / NULLIF(SUM(shape_area), 0)"
     select = [
         "input_id",
         "COUNT(*) AS fragments",
         "ROUND(SUM(shape_area), 2) AS total_area",
         f"ROUND({_INTERSECT}, 2) AS intersect_area",
         f"ROUND({_NO_OVERLAP}, 2) AS no_overlap_area",
-        f"ROUND({coverage}, 1) AS coverage_pct",
+        f"ROUND({pct}, 1) AS coverage_pct",
+        # Same thresholds/labels as core.domain.rules.coverage.coverage_class
         f"""CASE
-                WHEN SUM(shape_area) = 0 OR SUM(shape_area) IS NULL THEN 'No data'
-                WHEN {coverage} >= 75 THEN 'High (>=75%)'
-                WHEN {coverage} >= 25 THEN 'Medium (25-74%)'
-                WHEN {_INTERSECT} > 0 THEN 'Low (<25%)'
-                ELSE 'None (0%)'
+                WHEN SUM(shape_area) = 0 OR SUM(shape_area) IS NULL THEN '{coverage.CLASS_NO_DATA}'
+                WHEN {pct} >= {coverage.HIGH_MIN_PCT} THEN '{coverage.CLASS_HIGH}'
+                WHEN {pct} >= {coverage.MEDIUM_MIN_PCT} THEN '{coverage.CLASS_MEDIUM}'
+                WHEN {_INTERSECT} > 0 THEN '{coverage.CLASS_LOW}'
+                ELSE '{coverage.CLASS_NONE}'
             END AS coverage_class""",
     ]
     out_columns = ["input_id", "fragments", "total_area", "intersect_area",

@@ -11,6 +11,7 @@ Clean Architecture position:
 from .repository import SpatialRepository
 from .operations import OperationRunner
 from . import result_queries
+from ...domain.rules.naming import versioned_name, step_table_name
 
 
 class SpatialEngine:
@@ -74,6 +75,13 @@ class SpatialEngine:
         """Drop a table from SpatiaLite."""
         self._repo.drop_table(table_name)
 
+    def table_exists(self, table_name: str) -> bool:
+        return self._repo.table_exists(table_name)
+
+    def migrate_layers(self, layers, progress_callback=None):
+        """Migrate (overwrite) QGIS layers into SpatiaLite; stats per layer."""
+        return self._repo.project_manager.migrate_layers(layers, progress_callback)
+
     # ------------------------------------------------------------------ #
     #  Overlay analysis — cumulative versioned
     # ------------------------------------------------------------------ #
@@ -98,7 +106,7 @@ class SpatialEngine:
         base_sanitized = self._repo.sanitize_name(output_name)
         existing = self._repo.get_versions(base_sanitized)
         version_num = len(existing) + 1
-        final_table = f"{base_sanitized}__v{version_num}"
+        final_table = versioned_name(base_sanitized, version_num)
 
         temp_tables = []
         prev_table = target_table
@@ -106,8 +114,7 @@ class SpatialEngine:
 
         for i, assessment_table in enumerate(assessment_tables):
             is_last = (i == len(assessment_tables) - 1)
-            step_table = final_table if is_last else \
-                f"{base_sanitized}__step_{i}_tmp"
+            step_table = final_table if is_last else step_table_name(base_sanitized, i)
             if not is_last:
                 temp_tables.append(step_table)
 

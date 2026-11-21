@@ -5,11 +5,11 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QPushButton,
 )
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QFont
 from qgis.core import QgsProject
 
-from ...translator import tr
+from ..i18n.translator import tr
 
 
 class AssessmentDetailPanel(QWidget):

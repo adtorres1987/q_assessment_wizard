@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """ROLE_* constants and EMDSTreeModel — builds the EMDS project tree."""
 
-import json
-import re
-
-from qgis.PyQt.QtWidgets import QTreeWidget, QTreeWidgetItem
+from qgis.PyQt.QtWidgets import QTreeWidgetItem
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.core import QgsProject
 
-from ...translator import tr
+from ..i18n.translator import tr
+from ...core.domain.rules.naming import version_of, strip_version
 
 # Custom data roles
 ROLE_ID             = Qt.ItemDataRole.UserRole
@@ -25,14 +23,14 @@ class EMDSTreeModel:
     """
 
     @staticmethod
-    def populate_tree(tree_widget, admin_manager, plugin_dir=None,
+    def populate_tree(tree_widget, project_tree,
                       expanded_project_ids=None, selected_type=None, selected_id=None):
-        """Populate tree_widget from admin_manager data.
+        """Populate tree_widget from the GetProjectTree read model.
 
         Args:
             tree_widget:          QTreeWidget to populate
-            admin_manager:        AdminManager instance
-            plugin_dir:           ignored (kept for backward compatibility)
+            project_tree:         list of project dicts (see
+                                  core/application/use_cases/explorer_queries.py)
             expanded_project_ids: set of project IDs to auto-expand
             selected_type:        str — node type to re-select after rebuild
             selected_id:          int — node ID to re-select after rebuild
@@ -50,8 +48,7 @@ class EMDSTreeModel:
 
         item_to_select = None
 
-        projects = admin_manager.get_all_projects()
-        for project in projects:
+        for project in project_tree:
             proj_item = QTreeWidgetItem(tree_widget)
             proj_item.setText(0, f"📁 {project['name']}")
             proj_item.setFont(0, bold_font)
@@ -66,7 +63,7 @@ class EMDSTreeModel:
             should_expand = project['id'] in expanded_project_ids
 
             # ── 📁 Base Layers ────────────────────────────────────────────
-            base_layers = EMDSTreeModel._get_base_layers(project, admin_manager)
+            base_layers = project.get('base_layers', [])
             if base_layers:
                 bl_group = QTreeWidgetItem(proj_item)
                 bl_group.setText(0, tr('tree.base_layers'))
@@ -84,8 +81,7 @@ class EMDSTreeModel:
                     l_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
             # ── Assessments (direct children — no wrapper group) ──────────
-            assessments = admin_manager.get_assessments_for_project(project['id'])
-            for assessment in assessments:
+            for assessment in project.get('assessments', []):
                 status = EMDSTreeModel._assessment_status(assessment)
                 a_item = QTreeWidgetItem(proj_item)
                 a_item.setText(0, f"{status} 📁 {assessment['name']}")
@@ -104,40 +100,21 @@ class EMDSTreeModel:
                 w_item.setData(0, ROLE_ID,   assessment['id'])
                 w_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
-                config = admin_manager.get_analysis_config(assessment['id'])
-                if config:
-                    try:
-                        weights = json.loads(config.get('weights_json') or '{}')
-                        for layer_name, w in weights.items():
-                            wl_item = QTreeWidgetItem(w_item)
-                            wl_item.setText(0, f"  {layer_name}: {w * 100:.0f}%")
-                            wl_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                for layer_name, w in assessment.get('weights', {}).items():
+                    wl_item = QTreeWidgetItem(w_item)
+                    wl_item.setText(0, f"  {layer_name}: {w * 100:.0f}%")
+                    wl_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
 
                 if selected_type == 'weights' and selected_id == assessment['id']:
                     item_to_select = w_item
 
                 # ── 🔁 Analysis v{n} (all versions, sorted) ───────────────
-                all_tables = EMDSTreeModel._collect_analysis_items(
-                    admin_manager, assessment
-                )
-                if not all_tables:
-                    all_tables = assessment.get('output_tables', [])
+                all_tables = assessment.get('analysis_tables', [])
+                vis_cache = assessment.get('visibility', {})
 
-                vis_cache = (
-                    admin_manager.get_layer_visibility(assessment['id'])
-                    if all_tables else {}
-                )
-
-                def _ver(t):
-                    m = re.search(r'__v(\d+)$', t)
-                    return int(m.group(1)) if m else 0
-
-                for table_name in sorted(all_tables, key=_ver):
-                    v_match   = re.search(r'__v(\d+)$', table_name)
-                    v_num     = int(v_match.group(1)) if v_match else 1
-                    scen_name = re.sub(r'__v\d+$', '', table_name)
+                for table_name in sorted(all_tables, key=lambda t: version_of(t, default=0)):
+                    v_num     = version_of(table_name, default=1)
+                    scen_name = strip_version(table_name)
 
                     an_label  = tr('tree.analysis', n=v_num)
                     an_item = QTreeWidgetItem(a_item)
@@ -157,7 +134,7 @@ class EMDSTreeModel:
                         item_to_select = an_item
 
                 # ── 💼 Portfolios (LPA configurations, status 'pending') ──
-                for portfolio in admin_manager.get_portfolios_for_assessment(assessment['id']):
+                for portfolio in assessment.get('portfolios', []):
                     pf_item = QTreeWidgetItem(a_item)
                     pf_item.setText(0, tr(
                         'tree.portfolio', name=portfolio['name'],
@@ -175,28 +152,6 @@ class EMDSTreeModel:
                 proj_item.setExpanded(True)
 
         return item_to_select
-
-    @staticmethod
-    def _collect_analysis_items(admin_manager, assessment):
-        """Return flat list of all output table names for this assessment (all versions)."""
-        tables = []
-        provenances = admin_manager.get_provenance_for_assessment(assessment['id'])
-        for prov in provenances:
-            task_tree = admin_manager.build_task_tree(prov['id'])
-            EMDSTreeModel._collect_tables_from_tasks(task_tree, tables)
-        return tables
-
-    @staticmethod
-    def _collect_tables_from_tasks(task_list, tables):
-        """Recursively collect output_tables values from a nested task tree."""
-        for task in task_list:
-            try:
-                output_tables = json.loads(task.get('output_tables') or '[]')
-            except (json.JSONDecodeError, TypeError):
-                output_tables = []
-            tables.extend(output_tables)
-            if task.get('children'):
-                EMDSTreeModel._collect_tables_from_tasks(task['children'], tables)
 
     @staticmethod
     def _geometry_icon(layer_name):
@@ -226,12 +181,3 @@ class EMDSTreeModel:
                 return '🔴'
             return '🟡'
         return '🟢'
-
-    @staticmethod
-    def _get_base_layers(project, admin_manager):
-        """Return base layer names for the given project via admin_manager.
-
-        Delegates to admin_manager.get_base_layers_for_project() so that
-        the UI layer never accesses the database directly.
-        """
-        return admin_manager.get_base_layers_for_project(project['id'])

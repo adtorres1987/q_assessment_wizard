@@ -19,7 +19,7 @@ class SpatialRepository:
     # ------------------------------------------------------------------ #
 
     def open(self):
-        from ....project_manager import ProjectManager
+        from .project_manager import ProjectManager
         self._pm = ProjectManager(self.db_path)
         self._pm.connect()
 

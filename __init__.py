@@ -32,5 +32,5 @@ def classFactory(iface):  # pylint: disable=invalid-name
     :type iface: QgsInterface
     """
     #
-    from .assessment_wizard import QassessmentWizard
+    from .plugin import QassessmentWizard
     return QassessmentWizard(iface)

@@ -15,7 +15,6 @@ Analysis nodes open the Results Grid and the Portfolio Wizard from the context
 menu; the language selector re-translates the panel at runtime.
 """
 
-import os
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
@@ -25,12 +24,11 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.core import QgsProject, NULL
 
-from .translator import tr, set_language, get_language, LANGUAGES
+from .i18n.translator import tr, set_language, get_language, LANGUAGES
 
-from .assessment_wizard_dialog import QassessmentWizardDialog
-from .admin_manager import AdminManager
-from .ui.dialogs import ResultsGridDialog, CompareHistogramDialog, PortfolioWizard
-from .ui.panels import (
+from .wizard.assessment_wizard_dialog import QassessmentWizardDialog
+from .dialogs import ResultsGridDialog, CompareHistogramDialog, PortfolioWizard
+from .panels import (
     AssessmentDetailPanel,
     AnalysisDetailPanel,
     EMDSTreeModel,
@@ -48,30 +46,19 @@ class AssessmentMainForm(QWidget):
 
     language_changed = pyqtSignal(str)   # emits the new language code
 
-    def __init__(self, iface, plugin_dir, parent=None):
+    def __init__(self, iface, facade, parent=None):
+        """
+        Args:
+            iface:  QgisInterface.
+            facade: ExplorerFacade — the panel's only access to the application.
+        """
         super().__init__(parent)
         self.iface = iface
-        self.plugin_dir = plugin_dir
+        self.facade = facade
         self.selected_path = {
             "project_id": None,
             "assessment_id": None,
         }
-
-        # Initialize admin manager
-        self.admin_manager = AdminManager(plugin_dir)
-        self.admin_manager.connect()
-
-        # Auto-migrate from old metadata.db if it exists
-        old_metadata_path = os.path.join(plugin_dir, "metadata.db")
-        if os.path.exists(old_metadata_path):
-            try:
-                stats = self.admin_manager.migrate_from_metadata_db(old_metadata_path)
-                if stats['projects_migrated'] > 0 or stats['assessments_migrated'] > 0:
-                    print(f"Migrated {stats['projects_migrated']} projects and "
-                          f"{stats['assessments_migrated']} assessments from metadata.db")
-                os.rename(old_metadata_path, old_metadata_path + ".bak")
-            except Exception as e:
-                print(f"Warning: Migration from metadata.db failed: {e}")
 
         layout = QVBoxLayout(self)
 
@@ -109,7 +96,7 @@ class AssessmentMainForm(QWidget):
         self.results_text_edit.setReadOnly(True)
         self._detail_stack.addWidget(self.results_text_edit)   # index 1
 
-        self._analysis_panel = AnalysisDetailPanel(self.admin_manager)
+        self._analysis_panel = AnalysisDetailPanel(self.facade)
         self._analysis_panel.run_again_clicked.connect(self._on_run_mcda)
         self._detail_stack.addWidget(self._analysis_panel)     # index 2
 
@@ -197,7 +184,7 @@ class AssessmentMainForm(QWidget):
         self.tree.clear()
 
         item_to_select = EMDSTreeModel.populate_tree(
-            self.tree, self.admin_manager,
+            self.tree, self.facade.project_tree(),
             expanded_project_ids=expanded_project_ids,
             selected_type=selected_type,
             selected_id=selected_id
@@ -251,7 +238,6 @@ class AssessmentMainForm(QWidget):
                 node = node.parent()
 
         self.selected_path = path
-        node_type = current.data(0, ROLE_TYPE) if current else None
 
         self.btn_new_assessment.setEnabled(path['project_id'] is not None)
         self.btn_run_analysis.setEnabled(path['assessment_id'] is not None)
@@ -262,19 +248,12 @@ class AssessmentMainForm(QWidget):
         assessment_id   = item.data(0, ROLE_ID)
         assessment_name = item.data(0, ROLE_NAME) or item.text(0)
 
-        assessment   = self.admin_manager.get_assessment(assessment_id)
-        input_layers = self.admin_manager.get_assessment_layers(assessment_id, 'input')
+        details      = self.facade.assessment_details(assessment_id)
+        assessment   = details['assessment']
+        input_layers = details['input_layers']
+        weights      = details['weights']
         target_layer = assessment.get('target_layer', '') if assessment else ''
         created_at   = assessment.get('created_at', '')  if assessment else ''
-
-        import json as _json
-        config  = self.admin_manager.get_analysis_config(assessment_id)
-        weights = {}
-        if config:
-            try:
-                weights = _json.loads(config.get('weights_json') or '{}')
-            except (ValueError, TypeError):
-                weights = {}
 
         self._assessment_panel.show_assessment(
             name=assessment_name,
@@ -290,14 +269,14 @@ class AssessmentMainForm(QWidget):
         """Show project summary in the details area."""
         project_id = item.data(0, ROLE_ID)
         project_name = item.data(0, ROLE_NAME) or item.text(0)
-        assessments = self.admin_manager.get_assessments_for_project(project_id)
-        text = tr('main.details_project', name=project_name, count=len(assessments))
+        count = self.facade.project_summary(project_id)['assessment_count']
+        text = tr('main.details_project', name=project_name, count=count)
         self._detail_stack.setCurrentIndex(1)
         self.results_text_edit.setPlainText(text)
 
     def _show_portfolio_details(self, item):
         """Show the stored configuration of a portfolio (💼) node."""
-        portfolio = self.admin_manager.get_portfolio(item.data(0, ROLE_ID))
+        portfolio = self.facade.portfolio(item.data(0, ROLE_ID))
         self._detail_stack.setCurrentIndex(1)
         if not portfolio:
             self.results_text_edit.clear()
@@ -334,8 +313,8 @@ class AssessmentMainForm(QWidget):
 
     def _on_edit_weights(self, assessment_id):
         """Open WeightsEditDialog for the given assessment."""
-        from .ui.panels.analysis_detail_panel import WeightsEditDialog
-        dlg = WeightsEditDialog(assessment_id, self.admin_manager, parent=self)
+        from .panels.analysis_detail_panel import WeightsEditDialog
+        dlg = WeightsEditDialog(assessment_id, self.facade, parent=self)
         if dlg.exec():
             self._populate_tree()
             current = self.tree.currentItem()
@@ -347,9 +326,7 @@ class AssessmentMainForm(QWidget):
         project_id = self.selected_path.get('project_id')
         if not project_id:
             return
-        project_name = self._get_project_name(project_id)
-        from .assessment_executor import AssessmentExecutor
-        executor = AssessmentExecutor(project_name, self.admin_manager, project_id)
+        executor = self.facade.executor_for(project_id, self._get_project_name(project_id))
         executor.apply_mcda_score(assessment_id, table_name, parent_widget=self)
 
     def _get_project_name(self, project_id):
@@ -375,7 +352,7 @@ class AssessmentMainForm(QWidget):
 
         root = QgsProject.instance().layerTreeRoot()
         for table_name in output_tables:
-            self.admin_manager.set_layer_visibility(assessment_id, table_name, checked)
+            self.facade.set_layer_visibility(assessment_id, table_name, checked)
             layers = QgsProject.instance().mapLayersByName(table_name)
             for layer in layers:
                 node = root.findLayer(layer.id())
@@ -457,7 +434,7 @@ class AssessmentMainForm(QWidget):
         )
         if ok and name.strip():
             try:
-                self.admin_manager.create_project(name.strip())
+                self.facade.create_project(name.strip())
                 self._populate_tree()
             except Exception as e:
                 QMessageBox.warning(self, tr('main.err_title'),
@@ -473,7 +450,7 @@ class AssessmentMainForm(QWidget):
             tr('main.delete_project_body', name=project_name)
         )
         if ok and typed.strip() == project_name:
-            self.admin_manager.delete_project(project_id)
+            self.facade.delete_project(project_id)
             self._populate_tree()
         elif ok:
             QMessageBox.warning(
@@ -491,7 +468,7 @@ class AssessmentMainForm(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.admin_manager.delete_assessment(assessment_id)
+            self.facade.delete_assessment(assessment_id)
             self._populate_tree()
 
     def _on_toggle_analysis_visibility(self, item):
@@ -519,9 +496,7 @@ class AssessmentMainForm(QWidget):
             return
 
         assessment_name = item.data(0, ROLE_NAME) or item.text(0)
-        input_layers = self.admin_manager.get_assessment_layers(
-            assessment_id, layer_type='input'
-        )
+        input_layers = self.facade.assessment_details(assessment_id)['input_layers']
         if not input_layers:
             QMessageBox.warning(
                 self, tr('main.not_supported_title'),
@@ -537,9 +512,7 @@ class AssessmentMainForm(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        project_name = self._get_project_name(project_id)
-        from .assessment_executor import AssessmentExecutor
-        executor = AssessmentExecutor(project_name, self.admin_manager, project_id)
+        executor = self.facade.executor_for(project_id, self._get_project_name(project_id))
         result = executor.rerun_spatial_assessment(assessment_id, parent_widget=self)
 
         if result:
@@ -560,9 +533,7 @@ class AssessmentMainForm(QWidget):
         dlg = QassessmentWizardDialog(
             parent=self,
             iface=self.iface,
-            project_id=project_name,
-            admin_manager=self.admin_manager,
-            project_db_id=project_id
+            executor=self.facade.executor_for(project_id, project_name),
         )
         result = dlg.exec()
 
@@ -601,13 +572,11 @@ class AssessmentMainForm(QWidget):
 
     def _executor_for_item(self, item):
         """AssessmentExecutor for the project that contains *item* (or None)."""
-        from .assessment_executor import AssessmentExecutor
         project_item = self._project_item_of(item)
         if project_item is None:
             return None
-        project_id = project_item.data(0, ROLE_ID)
-        return AssessmentExecutor(
-            project_item.data(0, ROLE_NAME) or '', self.admin_manager, project_id
+        return self.facade.executor_for(
+            project_item.data(0, ROLE_ID), project_item.data(0, ROLE_NAME) or ''
         )
 
     @staticmethod
@@ -731,7 +700,7 @@ class AssessmentMainForm(QWidget):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.admin_manager.delete_portfolio(item.data(0, ROLE_ID))
+            self.facade.delete_portfolio(item.data(0, ROLE_ID))
             self._populate_tree()
 
     # ------------------------------------------------------------------ #
@@ -740,7 +709,5 @@ class AssessmentMainForm(QWidget):
 
     def showEvent(self, event):
         """Refresh tree every time the panel becomes visible."""
-        if self.admin_manager.connection is None:
-            self.admin_manager.connect()
         self._populate_tree()
         super().showEvent(event)

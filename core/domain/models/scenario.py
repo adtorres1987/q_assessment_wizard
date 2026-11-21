@@ -79,16 +79,6 @@ class Scenario:
     # ------------------------------------------------------------------ #
 
     @property
-    def is_spatial(self) -> bool:
-        """True when the scenario has assessment layers (spatial analysis case)."""
-        return bool(self.assessment_layers)
-
-    @property
-    def is_persisted(self) -> bool:
-        """True when the scenario has been saved to the database."""
-        return self.id is not None
-
-    @property
     def all_layers(self) -> List[LayerRef]:
         """All LayerRefs: target first, then assessment layers."""
         layers = []
@@ -106,47 +96,7 @@ class Scenario:
     #  Mutations (called by the application layer after migration)
     # ------------------------------------------------------------------ #
 
-    def set_table_name(self, layer_name: str, table_name: str) -> None:
-        """Record the SpatiaLite table name for a migrated layer.
-
-        Args:
-            layer_name:  Original QGIS layer name.
-            table_name:  Sanitized SpatiaLite table name returned by the engine.
-        """
-        if self.target_layer and self.target_layer.name == layer_name:
-            self.target_layer.table_name = table_name
-        for lr in self.assessment_layers:
-            if lr.name == layer_name:
-                lr.table_name = table_name
-
     def add_output_table(self, table_name: str) -> None:
         """Append a result table name after a successful overlay operation."""
         if table_name not in self.output_tables:
             self.output_tables.append(table_name)
-
-    # ------------------------------------------------------------------ #
-    #  Factory helpers
-    # ------------------------------------------------------------------ #
-
-    @classmethod
-    def from_dict(cls, data: dict, assessment_layers: Optional[List[str]] = None,
-                  output_tables: Optional[List[str]] = None) -> 'Scenario':
-        """Build a Scenario from an AdminManager assessment row dict."""
-        target_name = data.get('target_layer', '')
-        target_ref = LayerRef(name=target_name, role=LayerRole.TARGET) \
-            if target_name else None
-
-        a_layers = [
-            LayerRef(name=n, role=LayerRole.ASSESSMENT)
-            for n in (assessment_layers or [])
-        ]
-
-        return cls(
-            id=data.get('id'),
-            project_id=data.get('project_id'),
-            name=data.get('name', ''),
-            description=data.get('description', ''),
-            target_layer=target_ref,
-            assessment_layers=a_layers,
-            output_tables=list(output_tables or []),
-        )

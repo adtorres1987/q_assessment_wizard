@@ -18,8 +18,8 @@ UI layer → AssessmentExecutor (this file)
 
 from qgis.PyQt.QtWidgets import QMessageBox
 
-from .translator import tr
-from .core.application import (
+from .i18n.translator import tr
+from ..core.application import (
     CreateScenarioCommand,  CreateScenario,
     ApplyOverlayCommand,    ApplyOverlay,
     RollbackVersionCommand, RollbackVersion,
@@ -27,14 +27,16 @@ from .core.application import (
     GetResultsGridCommand,  GetResultsGrid, GetResultColumns,
     GetComparisonSeriesCommand, GetComparisonSeries,
     CreatePortfolioCommand, CreatePortfolio,
+    MigrateLayersCommand, FindExistingLayers, MigrateLayers,
+    FindAssessmentId,
 )
-from .core.application.use_cases.rerun_spatial_assessment import (
+from ..core.application.use_cases.rerun_spatial_assessment import (
     RerunSpatialAssessment, RerunSpatialAssessmentCommand,
 )
-from .core.application.use_cases.apply_mcda_score import (
+from ..core.application.use_cases.apply_mcda_score import (
     ApplyMcdaScore, ApplyMcdaScoreCommand,
 )
-from .core.application.use_cases.record_assessment import (
+from ..core.application.use_cases.record_assessment import (
     RecordAssessment, RecordAssessmentCommand,
 )
 
@@ -49,23 +51,28 @@ class AssessmentExecutor:
             admin_manager: AdminManager — satisfies MetadataRepositoryPort
             project_db_id: int  — project PK in admin.sqlite
         """
-        from .core.infrastructure.spatial import SpatialEngine
+        from ..core.infrastructure.spatial import SpatialEngine
+        from ..core.infrastructure.qgis import QgisMapLayers
+        map_layers = QgisMapLayers()
 
         self.project_id    = project_id
         self.project_db_id = project_db_id
 
         # Use case instances — each receives only the ports it needs
-        self._create_scenario = CreateScenario(admin_manager)
+        self._create_scenario = CreateScenario(admin_manager, map_layers)
         self._apply_overlay   = ApplyOverlay(admin_manager, SpatialEngine)
         self._rollback        = RollbackVersion(admin_manager, SpatialEngine)
         self._compare         = CompareVersions(admin_manager, SpatialEngine)
         self._rerun           = RerunSpatialAssessment(admin_manager, SpatialEngine)
-        self._mcda            = ApplyMcdaScore(admin_manager, SpatialEngine)
+        self._mcda            = ApplyMcdaScore(admin_manager, SpatialEngine, map_layers)
         self._record          = RecordAssessment(admin_manager)
         self._grid            = GetResultsGrid(admin_manager, SpatialEngine)
         self._columns         = GetResultColumns(admin_manager, SpatialEngine)
         self._series          = GetComparisonSeries(admin_manager, SpatialEngine)
         self._portfolio       = CreatePortfolio(admin_manager)
+        self._find_existing   = FindExistingLayers(admin_manager, SpatialEngine)
+        self._migrate         = MigrateLayers(admin_manager, SpatialEngine)
+        self._find_assessment = FindAssessmentId(admin_manager)
 
         # Keep reference for validate_assessment_name (thin query)
         self._meta = admin_manager
@@ -81,6 +88,10 @@ class AssessmentExecutor:
                 self.project_db_id, assessment_name
             )
         return True
+
+    def find_assessment_id(self, assessment_name):
+        """Id of the assessment called *assessment_name* in this project, or None."""
+        return self._find_assessment.execute(self.project_db_id, assessment_name)
 
     # ------------------------------------------------------------------ #
     #  Case 1: simple (memory) assessment
@@ -332,3 +343,23 @@ class AssessmentExecutor:
         except ValueError as e:
             QMessageBox.warning(parent_widget, tr('main.portfolio_title'), str(e))
             return None
+
+    # ------------------------------------------------------------------ #
+    #  Layer migration (used by the wizard's LayerMigrationService)
+    # ------------------------------------------------------------------ #
+
+    def existing_layers(self, layers):
+        """Names in *layers* (name -> QgsVectorLayer) already in SpatiaLite."""
+        return self._find_existing.execute(
+            MigrateLayersCommand(project_db_id=self.project_db_id, layers=layers)
+        )
+
+    def migrate_layers(self, layers, progress_callback=None):
+        """Migrate (overwrite) *layers*; see MigrateLayers for the result dict.
+
+        Raises RuntimeError (DB not found) and OperationCancelled.
+        """
+        return self._migrate.execute(
+            MigrateLayersCommand(project_db_id=self.project_db_id, layers=layers,
+                                 progress_callback=progress_callback)
+        )

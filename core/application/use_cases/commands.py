@@ -10,7 +10,7 @@ No validation lives in commands — validation is the use case's responsibility.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 @dataclass
@@ -201,3 +201,65 @@ class CreatePortfolioCommand:
     col_priority: str
     budget: float
     buckets: List[dict] = field(default_factory=list)
+
+
+@dataclass
+class MigrateLayersCommand:
+    """Command for FindExistingLayers / MigrateLayers.
+
+    Attributes:
+        project_db_id:      Project primary key (locates the SpatiaLite DB).
+        layers:             Ordered mapping layer name -> QgsVectorLayer.
+        progress_callback:  Optional callback(index, total, layer_name, message);
+                            may raise OperationCancelled to stop the migration.
+    """
+    project_db_id: int
+    layers: Dict[str, object]
+    progress_callback: Optional[Callable] = None
+
+
+# ── Project catalog (writes) ───────────────────────────────────────────────
+
+@dataclass
+class CreateProjectCommand:
+    """Create a project (and its SpatiaLite database)."""
+    name: str
+    description: str = ""
+
+
+@dataclass
+class DeleteProjectCommand:
+    """Soft-delete a project and all its assessments."""
+    project_id: int
+
+
+@dataclass
+class DeleteAssessmentCommand:
+    """Soft-delete one assessment."""
+    assessment_id: int
+
+
+@dataclass
+class DeletePortfolioCommand:
+    """Delete one portfolio configuration."""
+    portfolio_id: int
+
+
+@dataclass
+class SetLayerVisibilityCommand:
+    """Persist the visibility of an assessment output layer."""
+    assessment_id: int
+    table_name: str
+    visible: bool
+
+
+@dataclass
+class UpdateWeightsCommand:
+    """Replace the MCDA weights of an assessment.
+
+    Attributes:
+        weights: layer name -> weight as a fraction (the sum must be 1.0).
+    """
+    assessment_id: int
+    weights: Dict[str, float]
+

@@ -25,7 +25,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt
 
-from ...translator import tr
+from ..i18n.translator import tr
 
 PAGE_NAME = 0
 PAGE_COLUMNS = 1

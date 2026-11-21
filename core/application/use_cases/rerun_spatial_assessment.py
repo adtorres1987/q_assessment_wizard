@@ -20,10 +20,10 @@ Raises:
   - RuntimeError: project DB path not found.
 """
 
-import re
 
 from .commands import RerunSpatialAssessmentCommand
-from ..ports import MetadataRepositoryPort, SpatialEnginePort
+from ..ports import MetadataRepositoryPort
+from ...domain.rules.naming import version_of
 
 
 class RerunSpatialAssessment:
@@ -120,8 +120,7 @@ class RerunSpatialAssessment:
         )
 
         for table_name in output_tables:
-            v_match = re.search(r'__v(\d+)$', table_name)
-            v_num = int(v_match.group(1)) if v_match else next_v
+            v_num = version_of(table_name, default=next_v)
             self._meta.snapshot_analysis_for_version(
                 cmd.assessment_id, table_name, v_num
             )

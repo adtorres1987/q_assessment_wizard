@@ -146,17 +146,30 @@ processing flows.
 
 - The plugin folder is the working copy. Reload the plugin after editing, for
   example with *Plugin Reloader* or by restarting QGIS.
-- **Architecture.** UI (`main_form.py`, `assessment_wizard_dialog.py`, `ui/`)
-  calls `AssessmentExecutor`, which calls the use cases in
-  `core/application/use_cases/`. These go through the ports to `AdminManager`
-  and `SpatialEngine`. See [`CLAUDE.md`](CLAUDE.md) for the conventions:
+- **Architecture.** `plugin.py` is the QGIS entry point. The interface in `ui/`
+  (`main_panel.py`, `wizard/`, `panels/`, `dialogs/`) calls
+  `ui/assessment_executor.py`, which calls the use cases in
+  `core/application/use_cases/`. These go through the ports in
+  `core/application/ports/` to the implementations in `core/infrastructure/`
+  (`persistence/` for `admin.sqlite`, `spatial/` for SpatiaLite). See [`CLAUDE.md`](CLAUDE.md) for the conventions:
   Qt 5/6-compatible code, i18n keys and the layer-status keys.
-- **Translations** live in `translations/{en,es,pt,de}.json`. Add every new key to
+- **Translations** live in `ui/i18n/translations/{en,es,pt,de}.json`. Add every new key to
   all four files.
 - **Debugging.** `.vscode/launch.json` attaches to a debugpy listener on
   `127.0.0.1:5678`.
-- The `Makefile` and `pb_tool.cfg` come from the Plugin Builder template. Their
-  file lists are outdated, so don't use `make deploy` or `make zip` for packaging.
+- **Tests.** Run `tools/run_tests.sh` from anywhere:
+  - The unit tests (`tests/unit/`) and the architecture check run with plain `python3`;
+    no QGIS is needed.
+  - The integration tests (`tests/integration/`) run headless with the QGIS 4 Python,
+    detected automatically on macOS (set `QGIS_PYTHON` or `QGIS_APP` otherwise). They
+    work on a temporary copy of the plugin, so your projects are never touched.
+  - `tools/run_tests.sh --unit` runs only the fast part.
+- **Roadmap.** [`docs/ROADMAP.md`](docs/ROADMAP.md) lists the proposed features and
+  their priorities.
+- **Tooling.** `tools/` also contains `check_architecture.py` (layer dependency
+  rules), `check_qt6_enums.py`, `pylintrc` (`pylint --rcfile tools/pylintrc …`) and
+  `plugin_upload.py` for publishing to plugins.qgis.org. ZIPs built with `git archive`
+  leave `tests/` and `tools/` out.
 
 ## License
 

@@ -16,10 +16,10 @@ Returns:
     int: the assessment_id (new or existing).
 """
 
-import re
 
 from .commands import RecordAssessmentCommand
 from ..ports import MetadataRepositoryPort
+from ...domain.rules.naming import version_of
 
 
 class RecordAssessment:
@@ -90,8 +90,7 @@ class RecordAssessment:
                 self._meta.create_analysis_config(assessment_id, weights=weights)
 
         for table_name in output_tables:
-            v_match = re.search(r'__v(\d+)$', table_name)
-            v_num = int(v_match.group(1)) if v_match else 1
+            v_num = version_of(table_name, default=1)
             self._meta.snapshot_analysis_for_version(assessment_id, table_name, v_num)
 
         return assessment_id
@@ -102,11 +101,7 @@ class RecordAssessment:
 
     @staticmethod
     def _parse_version(output_tables: list) -> int:
-        if output_tables:
-            m = re.search(r'__v(\d+)$', output_tables[0])
-            if m:
-                return int(m.group(1))
-        return 1
+        return version_of(output_tables[0], default=1) if output_tables else 1
 
     def _record_provenance(self, assessment_id, output_tables,
                            target_layer_name, assessment_layer_names,

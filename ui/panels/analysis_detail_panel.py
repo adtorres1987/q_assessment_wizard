@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """WeightsEditDialog + AnalysisDetailPanel — MCDA analysis panels."""
 
-import json
-
 from qgis.PyQt.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QDoubleSpinBox, QFrame, QMessageBox,
@@ -10,7 +8,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QFont
 
-from ...translator import tr
+from ..i18n.translator import tr
 
 
 class WeightsEditDialog(QDialog):
@@ -20,24 +18,18 @@ class WeightsEditDialog(QDialog):
     Validates that weights sum to 100 % before saving to admin.sqlite.
     """
 
-    def __init__(self, assessment_id, admin_manager, parent=None):
+    def __init__(self, assessment_id, facade, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('panels.weights_dlg_title'))
         self.assessment_id  = assessment_id
-        self.admin_manager  = admin_manager
+        self._facade        = facade
         self._spinboxes     = {}   # layer_name → QDoubleSpinBox
 
         layout = QVBoxLayout(self)
 
-        config       = admin_manager.get_analysis_config(assessment_id) or {}
-        weights      = json.loads(config.get('weights_json') or '{}')
-        input_layers = admin_manager.get_assessment_layers(assessment_id, 'input')
-        layer_names  = [il['layer_name'] for il in input_layers]
-
-        # Also include any layers already in the weights dict but not in input_layers
-        for k in weights:
-            if k not in layer_names:
-                layer_names.append(k)
+        config      = facade.weights_config(assessment_id)
+        weights     = config['weights']
+        layer_names = config['layer_names']
 
         layout.addWidget(QLabel(tr('panels.weights_dlg_intro')))
 
@@ -87,7 +79,11 @@ class WeightsEditDialog(QDialog):
             return
         weights = {name: round(s.value() / 100, 4)
                    for name, s in self._spinboxes.items()}
-        self.admin_manager.update_analysis_config(self.assessment_id, weights=weights)
+        try:
+            self._facade.update_weights(self.assessment_id, weights)
+        except ValueError as e:   # business rule enforced by UpdateWeights
+            QMessageBox.warning(self, tr('panels.invalid_weights_title'), str(e))
+            return
         self.accept()
 
 
@@ -104,9 +100,9 @@ class AnalysisDetailPanel(QWidget):
 
     run_again_clicked = pyqtSignal(int, str)   # assessment_id, table_name
 
-    def __init__(self, admin_manager, parent=None):
+    def __init__(self, facade, parent=None):
         super().__init__(parent)
-        self._admin_manager = admin_manager
+        self._facade = facade
         self._assessment_id = None
         self._table_name    = None
         self._model_name    = None
@@ -191,15 +187,11 @@ class AnalysisDetailPanel(QWidget):
         self._lbl_title.setText(f"🔁 {model_name}")
         self._lbl_table.setText(table_name or "—")
 
-        # Prefer the snapshot tied to this specific output table (preserves history);
-        # fall back to the current Default config if no snapshot exists yet.
-        config = (
-            self._admin_manager.get_analysis_for_output_table(table_name)
-            if table_name else None
-        ) or self._admin_manager.get_analysis_config(assessment_id)
+        # GetAnalysisWeights prefers the snapshot tied to this output table and
+        # falls back to the current config; None means there is no config at all.
+        weights = self._facade.analysis_weights(assessment_id, table_name)
 
-        if config:
-            weights = json.loads(config.get('weights_json') or '{}')
+        if weights is not None:
             if weights:
                 self._lbl_weights.setText(
                     "\n".join(f"  {name}: {round(w * 100, 1)}%"

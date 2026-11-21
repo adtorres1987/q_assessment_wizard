@@ -7,3 +7,12 @@ projects/
 *.sqlite
 admin.sqlite
 CONTEXT.md
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Plugin runtime data (created in the plugin folder)
+metadata.db
+
+/docs/ROADMAP.md

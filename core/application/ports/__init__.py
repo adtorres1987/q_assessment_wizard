@@ -3,8 +3,10 @@
 
 from .metadata_repository import MetadataRepositoryPort
 from .spatial_engine_port import SpatialEnginePort
+from .map_layers_port import MapLayersPort
 
 __all__ = [
     'MetadataRepositoryPort',
     'SpatialEnginePort',
+    'MapLayersPort',
 ]

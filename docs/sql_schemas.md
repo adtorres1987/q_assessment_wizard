@@ -30,7 +30,7 @@
 
 ### 1.1 `admin.sqlite` — Central Metadata
 
-Source: `admin_manager.py` → `AdminManager._create_tables()`
+Source: `core/infrastructure/persistence/admin_manager.py` → `AdminManager._create_tables()`
 
 ```sql
 -- ============================================================
@@ -213,7 +213,7 @@ ALTER TABLE task_details ADD COLUMN is_scenario          INTEGER DEFAULT 0;
 
 ### 1.2 `projects/{name}.sqlite` — Per-Project SpatiaLite
 
-Source: `project_manager.py` → `ProjectManager._create_tables()`
+Source: `core/infrastructure/spatial/project_manager.py` → `ProjectManager._create_tables()`
 
 ```sql
 -- SpatiaLite initialization (called once on project creation)

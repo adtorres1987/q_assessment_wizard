@@ -7,14 +7,14 @@ Business rule:
   - At least one feature must be selected in the target layer.
 
 Output:
-  - QGIS memory layer added to the project's output group.
+  - Memory layer (via MapLayersPort) added to the project's output group.
   - Returns a wizard_results dict (same contract as AssessmentExecutor).
 
 Raises:
   - ValueError: if name is a duplicate or no features are selected.
 """
 
-from ..ports import MetadataRepositoryPort
+from ..ports import MetadataRepositoryPort, MapLayersPort
 from .commands import CreateScenarioCommand
 
 OUTPUT_GROUP_NAME = "Output Layers"
@@ -29,10 +29,15 @@ class CreateScenario:
     Args:
         metadata_repo: MetadataRepositoryPort implementation (optional — if
                        None, name uniqueness validation is skipped).
+        map_layers:    MapLayersPort implementation (QGIS map access).
     """
 
-    def __init__(self, metadata_repo: MetadataRepositoryPort = None):
+    def __init__(self, metadata_repo: MetadataRepositoryPort = None,
+                 map_layers: MapLayersPort = None):
+        if map_layers is None:
+            raise RuntimeError("CreateScenario requires a map_layers instance.")
         self._meta = metadata_repo
+        self._map = map_layers
 
     def execute(self, cmd: CreateScenarioCommand,
                 group_name: str = OUTPUT_GROUP_NAME) -> dict:
@@ -54,8 +59,7 @@ class CreateScenario:
         self._validate_selection(cmd.target_layer)
 
         layer_name = f"{cmd.project_id}__{cmd.assessment_name}"
-        memory_layer = self._build_memory_layer(cmd.target_layer, layer_name)
-        self._add_to_qgis(memory_layer, group_name)
+        self._map.add_selection_as_memory_layer(cmd.target_layer, layer_name, group_name)
 
         return {
             'assessment_name': cmd.assessment_name,
@@ -79,32 +83,8 @@ class CreateScenario:
                 )
 
     def _validate_selection(self, target_layer):
-        selected = list(target_layer.selectedFeatures())
-        if not selected:
+        if self._map.selected_feature_count(target_layer) == 0:
             raise ValueError(
                 "No features are selected in the target layer. "
                 "Please select features before creating the assessment."
             )
-
-    def _build_memory_layer(self, target_layer, layer_name):
-        from qgis.core import QgsVectorLayer, QgsWkbTypes
-        selected = list(target_layer.selectedFeatures())
-        geom_type = QgsWkbTypes.displayString(target_layer.wkbType())
-        crs = target_layer.crs().authid()
-
-        memory_layer = QgsVectorLayer(
-            f"{geom_type}?crs={crs}", layer_name, "memory"
-        )
-        dp = memory_layer.dataProvider()
-        dp.addAttributes(target_layer.fields().toList())
-        memory_layer.updateFields()
-        dp.addFeatures(selected)
-        memory_layer.updateExtents()
-        return memory_layer
-
-    def _add_to_qgis(self, layer, group_name):
-        from qgis.core import QgsProject
-        root = QgsProject.instance().layerTreeRoot()
-        group = root.findGroup(group_name) or root.addGroup(group_name)
-        QgsProject.instance().addMapLayer(layer, False)
-        group.addLayer(layer)

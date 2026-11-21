@@ -38,7 +38,7 @@ try:
 except Exception:  # ImportError, or no usable Qt binding
     HAS_MPL = False
 
-from ...translator import tr
+from ..i18n.translator import tr
 
 _BINS = 8  # bins used for numeric columns in the chart
 _SORT_ROLE = Qt.ItemDataRole.UserRole
