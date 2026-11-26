@@ -13,14 +13,14 @@ A QGIS Python plugin ("Assessment Wizard" / EMDS Project Explorer) for building 
 - No Qt resource file: the toolbar icon is loaded from `icon.png` by path (`pyrcc5` does not exist for Qt 6).
 - Tests: `tools/run_tests.sh` runs everything: unit tests, the architecture check, and, when a QGIS Python is found, the Qt6 enum scan plus the integration tests. Use `tools/run_tests.sh --unit` for the parts that need no QGIS.
   - Unit tests (`tests/unit/`, stdlib `unittest`, fakes in `tests/fakes.py`) run with plain `python3`, no QGIS. Single test: `python3 -m unittest tests.unit.test_use_cases.CatalogTest.test_update_weights_sum_rule` from the plugin root.
-  - Integration tests (`tests/integration/qgis_*.py`) are scripts run by the QGIS 4 Python on a scratch copy of the plugin. On macOS, QGIS is auto-detected (override with `QGIS_APP`). Elsewhere, set `QGIS_PYTHON` to a QGIS-enabled interpreter.
+  - Integration tests (`tests/integration/qgis_*.py`) are scripts run by the QGIS 4 Python on a scratch copy of the plugin. They end with `os._exit()` after printing the result: normal interpreter teardown of Qt/QGIS objects intermittently segfaults (rc 134/139). On macOS, QGIS is auto-detected (override with `QGIS_APP`). Elsewhere, set `QGIS_PYTHON` to a QGIS-enabled interpreter.
   - `python3 tools/check_architecture.py` enforces the layer rules below. Run it (or the whole runner) before committing structural changes.
 - Lint: `pylint --rcfile tools/pylintrc <files>`. `tools/plugin_upload.py` uploads a ZIP to plugins.qgis.org.
 - Packaging: `git archive --format=zip --prefix=q_assessment_wizard/ HEAD -o q_assessment_wizard.zip` (`.gitattributes` keeps `tests/`, `tools/`, `.vscode/` and CLAUDE.md out of the ZIP).
 
 ## Architecture
 
-Entry: `__init__.py:classFactory` → `plugin.py:QassessmentWizard`, which creates a persistent `QDockWidget` hosting `ui/main_panel.py:AssessmentMainForm` (project/assessment tree + detail panels in `ui/panels/`). The toolbar action just toggles the dock. From the main panel, `ui/wizard/assessment_wizard_dialog.py:QassessmentWizardDialog` (a `QWizard` loaded at runtime from `ui/wizard/assessment_wizard_dialog_base.ui` via `uic.loadUiType`) runs the create-assessment flow, using `ui/wizard/map_tools.py` + `canvas_crs.py` for on-canvas feature selection and `assessment_summary.py` for the page-3 summary.
+Entry: `__init__.py:classFactory` → `plugin.py:QassessmentWizard`, which creates a persistent `QDockWidget` hosting `ui/main_panel/panel.py:AssessmentMainForm` (project/assessment tree + detail panels in `ui/panels/`). The toolbar action just toggles the dock. From the main panel, `ui/wizard/assessment_wizard_dialog.py:QassessmentWizardDialog` (a `QWizard` loaded at runtime from `ui/wizard/assessment_wizard_dialog_base.ui` via `uic.loadUiType`) runs the create-assessment flow, using `ui/wizard/map_tools.py` + `canvas_crs.py` for on-canvas feature selection and `assessment_summary.py` for the page-3 summary.
 
 Folder layout (each folder is one layer; only `__init__.py`, `plugin.py`, `metadata.txt` and `icon.png` live in the root, as QGIS requires):
 
@@ -37,7 +37,9 @@ core/infrastructure/persistence/ admin.sqlite access: AdminManager (connection) 
 core/infrastructure/spatial/    SpatiaLite access: SpatialEngine, OperationRunner, result_queries, ProjectManager
                                 (connection/schema) + project_db/ mixins (spatialite, layer_migrator, tables, versions)
 core/infrastructure/qgis/       live QGIS project adapters (QgisMapLayers → MapLayersPort)
-ui/                             main_panel.py, explorer_facade.py (catalog/reads), assessment_executor.py (per-project analysis ops)
+ui/                             explorer_facade.py (catalog/reads), assessment_executor.py (per-project analysis ops)
+ui/main_panel/                  panel.py (dock content: layout, i18n, lifecycle) + tree_view / detail_views /
+                                context_menu / catalog_actions / results_actions mixins
 ui/wizard/                      assessment_wizard_dialog.py (lifecycle) + layer_table / page_configuration /
                                 page_selection / page_summary mixins, map_tools, canvas_crs, layer_migration
 ui/panels/  ui/dialogs/  ui/i18n/ (translator + translations/*.json)
@@ -63,7 +65,7 @@ UI (ui/main_panel, ui/wizard, ui/panels, ui/dialogs)
 - Only `plugin.py` knows `AdminManager`. Widgets get an `ExplorerFacade` (the panel, tree, detail panels and weights editor) or an `AssessmentExecutor` (the wizard and its migration service). Never pass the repository into a widget. The only place in `ui/` allowed to import `core/infrastructure` is `assessment_executor.py`, which wires `SpatialEngine` and `QgisMapLayers` into the use cases.
 - Use cases never import QGIS; anything they need from the live map goes through `MapLayersPort`. Writes take a Command dataclass. Reads (`explorer_queries.py`, `query_results.py`) take plain arguments and return dicts/lists (read models).
 - Long operations stop by raising `OperationCancelled` from the progress callback. Adapters must re-raise it instead of recording it as an item error (see `ProjectManager.migrate_layers`).
-- Large classes are split into **mixin modules by responsibility** (`AdminManager`, `ProjectManager`, the wizard). The public API stays on the main class. Mixins share `self` state, define no `__init__`, and in the wizard they must precede the Qt bases. Add new behaviour as a new mixin module instead of growing one past ~300 lines.
+- Large classes are split into **mixin modules by responsibility** (`AdminManager`, `ProjectManager`, the wizard, the main panel). The public API stays on the main class. Mixins share `self` state, define no `__init__`, and in the wizard and the main panel they must precede the Qt bases. A new tree action = a menu entry in `main_panel/context_menu.py` + a handler in `catalog_actions.py` or `results_actions.py`. Add new behaviour as a new mixin module instead of growing one past ~300 lines.
 - Use cases receive `SpatialEngine` as a *factory* (`with self._engine_factory(db_path) as engine:`), not an instance.
 - Command dataclasses (`use_cases/commands.py`) are the boundary where `QgsVectorLayer` objects are allowed in.
 - Adding a new operation = new Command + use case, export it from `core/application/use_cases/__init__.py` and `core/application/__init__.py`, wire it in `AssessmentExecutor` or `ExplorerFacade`, and extend the port Protocol if the use case needs new repository/engine methods (AdminManager satisfies it by duck typing, so just add the method there).
@@ -81,7 +83,7 @@ Two-tier SQLite, both created in the plugin directory at runtime (gitignored):
 
 ## Results viewers (ported from the sibling `../plugin_wizard`)
 
-- `ui/dialogs/`: `ResultsGridDialog` (filter/group/sort, chart, CSV/xlsx + PDF export), `CompareHistogramDialog` (paired "butterfly" histogram) and `PortfolioWizard`. They are launched from the tree context menu in `ui/main_panel.py`: `🔁 Analysis` nodes open the grid and the portfolio wizard, the project node opens the comparison.
+- `ui/dialogs/`: `ResultsGridDialog` (filter/group/sort, chart, CSV/xlsx + PDF export), `CompareHistogramDialog` (paired "butterfly" histogram) and `PortfolioWizard`. They are launched from the tree context menu (`ui/main_panel/context_menu.py`, handlers in `results_actions.py`): `🔁 Analysis` nodes open the grid and the portfolio wizard, the project node opens the comparison.
 - Dialogs never touch a DB. Data comes through `AssessmentExecutor.get_results_grid / get_result_columns / get_comparison_series / create_portfolio`, which call the use cases in `core/application/use_cases/query_results.py` and `create_portfolio.py`. Those reach the SQL in `core/infrastructure/spatial/result_queries.py` via `SpatialEngine.results_*`.
 - The query use cases raise `LookupError` when a table isn't in SpatiaLite. Simple (memory) assessments hit this, and `main_panel` then falls back to the loaded QGIS layer's attributes.
 - matplotlib must be imported from `matplotlib.backends.backend_qtagg` (the Qt5 backend fails on QGIS 4). openpyxl isn't bundled with QGIS 4.0.3, so Excel export writes CSV.

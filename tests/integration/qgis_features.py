@@ -311,10 +311,20 @@ from qgis.PyQt.QtWidgets import QTreeWidgetItemIterator as _It
 from q_assessment_wizard.ui.panels import WeightsEditDialog
 wd = WeightsEditDialog(aid, fc); spin = next(iter(wd._spinboxes.values())); spin.setValue(50); msgs.clear(); wd._on_save()
 check("weights dialog: 50% blocked (dialog stays open, warning)", wd.result() == 0 and any(m[0] == 'warning' for m in msgs), str(msgs))
+# panel → weights editor (lazy relative import inside CatalogActionsMixin._on_edit_weights)
+opened = []
+_orig_wd_exec = WeightsEditDialog.exec
+WeightsEditDialog.exec = lambda self: opened.append(self) or 0
+step("panel: edit weights opens the editor", lambda: mf._on_edit_weights(aid))
+WeightsEditDialog.exec = _orig_wd_exec
+check("panel: weights editor opened for the assessment", len(opened) == 1, str(opened))
 
 # ── 8. delete portfolio, unload ────────────────────────────────────────────
 items_by_type().get('portfolio') and step("delete portfolio", lambda: mf._on_delete_portfolio(items_by_type()['portfolio'][0]))
 check("portfolio deleted", am.get_portfolios_for_assessment(aid) == [] and not items_by_type().get('portfolio'))
 step("unload", plugin.unload)
 print("\nRESULT:", "ALL PASS" if not FAILS else f"{len(FAILS)} FAIL: {FAILS}")
-sys.exit(1 if FAILS else 0)
+# Skip interpreter finalization: tearing down Qt/QGIS objects in GC order
+# intermittently segfaults (rc 134/139) after all checks have already run.
+sys.stdout.flush(); sys.stderr.flush()
+os._exit(1 if FAILS else 0)

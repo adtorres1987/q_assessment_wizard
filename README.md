@@ -147,7 +147,7 @@ processing flows.
 - The plugin folder is the working copy. Reload the plugin after editing, for
   example with *Plugin Reloader* or by restarting QGIS.
 - **Architecture.** `plugin.py` is the QGIS entry point. The interface in `ui/`
-  (`main_panel.py`, `wizard/`, `panels/`, `dialogs/`) calls
+  (`main_panel/`, `wizard/`, `panels/`, `dialogs/`) calls
   `ui/assessment_executor.py`, which calls the use cases in
   `core/application/use_cases/`. These go through the ports in
   `core/application/ports/` to the implementations in `core/infrastructure/`

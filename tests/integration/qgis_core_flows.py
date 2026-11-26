@@ -110,4 +110,7 @@ step("tree walk + detail panels + checkboxes", tree_walk)
 step("unload", plugin.unload)
 print("MESSAGES:"); [print("  ", m) for m in msgs]
 print("\nRESULT:", "ALL PASS" if not FAILED else f"{len(FAILED)} FAIL: {FAILED}")
-sys.exit(1 if FAILED else 0)
+# Skip interpreter finalization: tearing down Qt/QGIS objects in GC order
+# intermittently segfaults (rc 134/139) after all checks have already run.
+sys.stdout.flush(); sys.stderr.flush()
+os._exit(1 if FAILED else 0)
