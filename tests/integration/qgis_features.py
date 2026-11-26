@@ -72,11 +72,12 @@ grid = step("grid query", lambda: ex.get_results_grid(v1))
 if grid:
     rows = {r[0]: dict(zip(grid['columns'], r)) for r in grid['rows']}
     check("grid: one row per target feature", len(rows) == 3, f"rows={len(rows)}")
-    # Engine semantics: overlapping features keep only the intersection.
-    ok_hit = all(abs(rows[i]['coverage_pct'] - 100.0) < 0.01 and rows[i]['coverage_class'] == 'High (>=75%)'
-                 and abs(rows[i]['intersect_area'] - 1) < 1e-6 for i in (1, 2))
+    # Coverage relative to the original feature (F-02): 2x2 parcels with a 1x1 overlap → 25 %.
+    ok_hit = all(abs(rows[i]['coverage_pct'] - 25.0) < 0.01 and rows[i]['coverage_class'] == 'Medium (25-74%)'
+                 and abs(rows[i]['intersect_area'] - 1) < 1e-6 and abs(rows[i]['no_overlap_area'] - 3) < 1e-6
+                 and abs(rows[i]['total_area'] - 4) < 1e-6 for i in (1, 2))
     ok_miss = rows[3]['coverage_pct'] == 0 and rows[3]['coverage_class'] == 'None (0%)' and abs(rows[3]['no_overlap_area'] - 4) < 1e-6
-    check("grid: intersecting features 100%/High, isolated feature 0%/None (area 4)", ok_hit and ok_miss, str(rows))
+    check("grid: intersecting features 25%/Medium (1 of 4), isolated feature 0%/None (area 4)", ok_hit and ok_miss, str(rows))
     check("grid: sorted by coverage desc", grid['rows'][-1][0] == 3)
     check("grid v1: no mcda column (not scored)", 'mcda_score' not in grid['columns'])
 g2 = step("grid v2 (MCDA scored)", lambda: ex.get_results_grid(v2))
@@ -97,7 +98,7 @@ def grid_dialog():
     d.group_combo.setCurrentIndex(d.group_combo.findData("coverage_class"))
     grouped_rows = d.proxy.rowCount()
     d.group_combo.setCurrentIndex(0)
-    d.filter_input.setText("High"); filtered = d.proxy.rowCount(); d.filter_input.setText("")
+    d.filter_input.setText("Medium"); filtered = d.proxy.rowCount(); d.filter_input.setText("")
     chart_ok = d.chart_col_combo.count() > 0 and len(d.figure.axes) == 1
     csv_path = os.path.join(SP, "grid.csv"); d.write_table(csv_path, use_xlsx=False)
     with open(csv_path, encoding="utf-8-sig") as fh: data = list(csv.reader(fh))
@@ -108,7 +109,7 @@ res = step("grid dialog", grid_dialog)
 if res:
     grouped_rows, filtered, chart_ok, data, pdf_ok, pdf_size = res
     check("grid dialog: grouping adds one header per class", grouped_rows == 5, f"rows={grouped_rows}")
-    check("grid dialog: filter 'High' keeps 2 rows", filtered == 2, f"rows={filtered}")
+    check("grid dialog: filter 'Medium' keeps 2 rows", filtered == 2, f"rows={filtered}")
     check("grid dialog: chart drawn", chart_ok)
     check("grid dialog: CSV header + 3 rows", len(data) == 4 and data[0][:2] == ['input_id', 'fragments'], str(data[:2]))
     check("grid dialog: PDF written (grid + chart)", pdf_ok, f"{pdf_size} bytes")

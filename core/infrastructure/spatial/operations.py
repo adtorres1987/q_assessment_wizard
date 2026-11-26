@@ -102,13 +102,30 @@ class OperationRunner:
     @staticmethod
     def _build_cumulative_step_query(prev_table, assessment_table, output_table,
                                       is_first_step=True):
+        """SQL for one cumulative overlay step.
+
+        Rows: one 'intersect' fragment per (a, b) pair with a positive-area
+        polygonal intersection, plus one 'no_overlap' row (the whole of *a*)
+        for every *a* that has none. The two branches share the same
+        ``_OVERLAPS`` condition, so every input row lands in exactly one of
+        them — including features that only touch an assessment polygon
+        along an edge.
+
+        The non-intersected remainder is not stored as geometry; instead every
+        row carries ``source_area``, the area of the ORIGINAL target feature
+        (computed in the first step, carried over in later steps), from which
+        the results queries derive coverage (see result_queries.py).
+        """
         if is_first_step:
             intersect_id = "a.id AS input_id"
             noop_id      = "a.id AS input_id, NULL AS identity_id"
+            source_area  = "Area(a.geom) AS source_area"
         else:
             intersect_id = "a.input_id"
             noop_id      = "a.input_id, a.identity_id"
+            source_area  = "a.source_area"
 
+        overlaps = OperationRunner._OVERLAPS
         return f"""
         CREATE TABLE {output_table} AS
         SELECT
@@ -117,13 +134,10 @@ class OperationRunner:
             CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
             'intersect' AS split_type,
             Area(Intersection(a.geom, b.geom))      AS shape_area,
-            Perimeter(Intersection(a.geom, b.geom)) AS shape_length
+            Perimeter(Intersection(a.geom, b.geom)) AS shape_length,
+            {source_area}
         FROM {prev_table} a
-        JOIN {assessment_table} b ON Intersects(a.geom, b.geom)
-        WHERE IsValid(a.geom)
-          AND IsValid(b.geom)
-          AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON','MULTIPOLYGON')
-          AND Area(Intersection(a.geom, b.geom)) > 0
+        JOIN {assessment_table} b ON {overlaps}
 
         UNION ALL
 
@@ -132,10 +146,17 @@ class OperationRunner:
             CastToMultiPolygon(a.geom) AS geom,
             'no_overlap' AS split_type,
             Area(a.geom)      AS shape_area,
-            Perimeter(a.geom) AS shape_length
+            Perimeter(a.geom) AS shape_length,
+            {source_area}
         FROM {prev_table} a
         WHERE NOT EXISTS (
-            SELECT 1 FROM {assessment_table} b
-            WHERE Intersects(a.geom, b.geom) AND IsValid(b.geom)
+            SELECT 1 FROM {assessment_table} b WHERE {overlaps}
         )
         """
+
+    # a and b share a positive-area polygonal intersection.
+    _OVERLAPS = """Intersects(a.geom, b.geom)
+          AND IsValid(a.geom)
+          AND IsValid(b.geom)
+          AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON','MULTIPOLYGON')
+          AND Area(Intersection(a.geom, b.geom)) > 0"""

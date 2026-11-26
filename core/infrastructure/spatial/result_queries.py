@@ -7,6 +7,18 @@ fragment, with ``input_id`` (feature of the target layer), ``split_type``
 ('intersect' | 'no_overlap') and ``shape_area``. These helpers aggregate it
 per target feature for the results grid and the comparison histogram.
 
+Coverage per target feature (tables with ``source_area``, written since F-02):
+
+    total_area      = source_area (area of the original target feature)
+    intersect_area  = area of the UNION of its 'intersect' fragments, capped at
+                      total_area (overlapping assessment polygons are not
+                      double counted)
+    no_overlap_area = total_area - intersect_area
+    coverage_pct    = intersect_area * 100 / total_area
+
+Older tables (no ``source_area`` column) only stored the intersection, so they
+keep the previous sum-of-fragments formulas, whose coverage is 0 % or 100 %.
+
 All functions take an open sqlite3 connection to the project SpatiaLite DB.
 
 Raises:
@@ -20,17 +32,34 @@ from ...domain.rules import coverage
 _GEOMETRY_COLUMNS = {"geom", "geometry"}
 _REQUIRED_COLUMNS = {"input_id", "split_type", "shape_area"}
 
-_INTERSECT = "SUM(CASE WHEN split_type='intersect' THEN shape_area ELSE 0 END)"
-_NO_OVERLAP = "SUM(CASE WHEN split_type='no_overlap' THEN shape_area ELSE 0 END)"
+_SUM_INTERSECT = "SUM(CASE WHEN split_type='intersect' THEN shape_area ELSE 0 END)"
+_SUM_NO_OVERLAP = "SUM(CASE WHEN split_type='no_overlap' THEN shape_area ELSE 0 END)"
 
-# Per-target-feature aggregates available to the histogram.
-FIELD_EXPRESSIONS = {
-    "coverage_pct":    f"{_INTERSECT} * 100.0 / NULLIF(SUM(shape_area), 0)",
-    "total_area":      "SUM(shape_area)",
-    "intersect_area":  _INTERSECT,
-    "no_overlap_area": _NO_OVERLAP,
-    "fragments":       "COUNT(*)",
-}
+
+def _area_expressions(has_source_area):
+    """(total, intersect, no_overlap) SQL aggregates per target feature."""
+    if not has_source_area:                     # tables written before F-02
+        return "SUM(shape_area)", _SUM_INTERSECT, _SUM_NO_OVERLAP
+    total = "MAX(source_area)"
+    covered = ("COALESCE(Area(GUnion(CASE WHEN split_type='intersect' "
+               "THEN geom END)), 0)")
+    intersect = f"MIN({covered}, {total})"
+    return total, intersect, f"MAX({total} - {intersect}, 0)"
+
+
+def _field_expressions(has_source_area):
+    """Per-target-feature aggregates available to the histogram."""
+    total, intersect, no_overlap = _area_expressions(has_source_area)
+    return {
+        "coverage_pct":    f"{intersect} * 100.0 / NULLIF({total}, 0)",
+        "total_area":      total,
+        "intersect_area":  intersect,
+        "no_overlap_area": no_overlap,
+        "fragments":       "COUNT(*)",
+    }
+
+
+FIELD_EXPRESSIONS = _field_expressions(True)
 NUMERIC_FIELDS = list(FIELD_EXPRESSIONS)
 
 
@@ -57,6 +86,10 @@ def _require_overlay(conn, table):
     return columns
 
 
+def _has_source_area(columns):
+    return "source_area" in {c.lower() for c in columns}
+
+
 def coverage_summary(conn, table):
     """Aggregate an overlay table per target feature.
 
@@ -70,20 +103,21 @@ def coverage_summary(conn, table):
     columns = _require_overlay(conn, table)
     score_col = next((c for c in columns if c.lower() == "mcda_score"), None)
 
-    pct = f"{_INTERSECT} * 100.0 / NULLIF(SUM(shape_area), 0)"
+    total, intersect, no_overlap = _area_expressions(_has_source_area(columns))
+    pct = f"{intersect} * 100.0 / NULLIF({total}, 0)"
     select = [
         "input_id",
         "COUNT(*) AS fragments",
-        "ROUND(SUM(shape_area), 2) AS total_area",
-        f"ROUND({_INTERSECT}, 2) AS intersect_area",
-        f"ROUND({_NO_OVERLAP}, 2) AS no_overlap_area",
+        f"ROUND({total}, 2) AS total_area",
+        f"ROUND({intersect}, 2) AS intersect_area",
+        f"ROUND({no_overlap}, 2) AS no_overlap_area",
         f"ROUND({pct}, 1) AS coverage_pct",
         # Same thresholds/labels as core.domain.rules.coverage.coverage_class
         f"""CASE
-                WHEN SUM(shape_area) = 0 OR SUM(shape_area) IS NULL THEN '{coverage.CLASS_NO_DATA}'
+                WHEN {total} = 0 OR {total} IS NULL THEN '{coverage.CLASS_NO_DATA}'
                 WHEN {pct} >= {coverage.HIGH_MIN_PCT} THEN '{coverage.CLASS_HIGH}'
                 WHEN {pct} >= {coverage.MEDIUM_MIN_PCT} THEN '{coverage.CLASS_MEDIUM}'
-                WHEN {_INTERSECT} > 0 THEN '{coverage.CLASS_LOW}'
+                WHEN {intersect} > 0 THEN '{coverage.CLASS_LOW}'
                 ELSE '{coverage.CLASS_NONE}'
             END AS coverage_class""",
     ]
@@ -106,8 +140,8 @@ def coverage_values(conn, table, field):
         raise ValueError(
             f"Unknown field '{field}'. Available: {', '.join(NUMERIC_FIELDS)}"
         )
-    _require_overlay(conn, table)
+    expression = _field_expressions(_has_source_area(_require_overlay(conn, table)))[field]
     rows = conn.execute(
-        f"SELECT {FIELD_EXPRESSIONS[field]} FROM {_quote(table)} GROUP BY input_id"
+        f"SELECT {expression} FROM {_quote(table)} GROUP BY input_id"
     ).fetchall()
     return [r[0] for r in rows if r[0] is not None]

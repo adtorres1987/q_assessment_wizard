@@ -129,9 +129,10 @@ processing flows.
 
 ## Known limitations
 
-- **Coverage per feature is all-or-nothing.** In an overlay, a target feature that
-  touches an assessment layer keeps only its intersecting part. As a result, its
-  coverage % is either 100 % or 0 %. See the note in `docs/sql_schemas.md`.
+- **Versions created before 2026-11-26 show all-or-nothing coverage.** Since then the
+  coverage % is the share of each target feature covered by the assessment layers.
+  Older versions keep the previous 0 %/100 % values; run the analysis again to get
+  a new version with the new calculation. See the note in `docs/sql_schemas.md`.
 - **Overlay outputs do not keep the source layers' attributes.** The portfolio
   wizard can therefore only map the geometry-derived columns (`shape_area`,
   `shape_length`, `MCDA_SCORE`, …).

@@ -62,6 +62,7 @@ section "Qt6 enum scan"
     || status=1
 run_qgis "integration: core flows" "$ROOT/tests/integration/qgis_core_flows.py"
 run_qgis "integration: features + i18n" "$ROOT/tests/integration/qgis_features.py"
+run_qgis "integration: overlay coverage semantics" "$ROOT/tests/integration/qgis_overlay_semantics.py"
 section "integration: dock drag (Qt 6 crash workaround)"; fresh
 drag="$(cd /tmp && PLUGROOT="$work/plugins" VARIANT=none "${qgis_python[@]}" \
         "$ROOT/tests/integration/qgis_dock_drag.py" plugin 10 2>&1)"

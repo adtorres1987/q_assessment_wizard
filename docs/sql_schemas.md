@@ -279,8 +279,10 @@ CREATE TABLE {versioned_name} (       -- created with CREATE TABLE ... AS SELECT
     identity_id     INTEGER,            -- assessment layer feature rowid (NULL for no_overlap)
     geom            MULTIPOLYGON,
     split_type      TEXT,               -- 'intersect' | 'no_overlap'
-    shape_area      REAL,
-    shape_length    REAL
+    shape_area      REAL,               -- area of this fragment
+    shape_length    REAL,
+    source_area     REAL                -- area of the ORIGINAL target feature (same on all its rows).
+                                        -- Absent in tables written before F-02 (2026-11-26).
     -- MCDA_SCORE REAL is added by ApplyMcdaScore (score_table)
     -- NOTE: source layer attributes are NOT carried over.
 );
@@ -630,42 +632,59 @@ step reads the previous step's output):
 ```sql
 CREATE TABLE {output_table} AS
 -- Fragments that intersect the assessment layer
+-- {overlaps} = Intersects(a.geom, b.geom) AND IsValid(a.geom) AND IsValid(b.geom)
+--              AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON','MULTIPOLYGON')
+--              AND Area(Intersection(a.geom, b.geom)) > 0
 SELECT
     a.id AS input_id,                 -- step 2+: a.input_id (carried over)
     b.rowid AS identity_id,
     CastToMultiPolygon(Intersection(a.geom, b.geom)) AS geom,
     'intersect' AS split_type,
     Area(Intersection(a.geom, b.geom))      AS shape_area,
-    Perimeter(Intersection(a.geom, b.geom)) AS shape_length
+    Perimeter(Intersection(a.geom, b.geom)) AS shape_length,
+    Area(a.geom) AS source_area       -- step 2+: a.source_area (carried over)
 FROM {prev_table} a
-JOIN {assessment_table} b ON Intersects(a.geom, b.geom)
-WHERE IsValid(a.geom) AND IsValid(b.geom)
-  AND GeometryType(Intersection(a.geom, b.geom)) IN ('POLYGON','MULTIPOLYGON')
-  AND Area(Intersection(a.geom, b.geom)) > 0
+JOIN {assessment_table} b ON {overlaps}
 
 UNION ALL
 
--- Features that do not touch the assessment layer at all
+-- Features with no positive-area intersection (incl. edge-only contact):
+-- same condition as above, so every input row lands in exactly one branch.
 SELECT
     a.id AS input_id, NULL AS identity_id,   -- step 2+: a.input_id, a.identity_id
     CastToMultiPolygon(a.geom) AS geom,
     'no_overlap' AS split_type,
-    Area(a.geom), Perimeter(a.geom)
+    Area(a.geom), Perimeter(a.geom),
+    Area(a.geom) AS source_area              -- step 2+: a.source_area
 FROM {prev_table} a
-WHERE NOT EXISTS (SELECT 1 FROM {assessment_table} b
-                  WHERE Intersects(a.geom, b.geom) AND IsValid(b.geom));
+WHERE NOT EXISTS (SELECT 1 FROM {assessment_table} b WHERE {overlaps});
 
 -- Geometry registration: MULTIPOLYGON, falling back to POLYGON / GEOMETRY.
 -- RecoverGeometryColumn() returns 0 on failure (it does not raise).
 SELECT RecoverGeometryColumn('{output_table}', 'geom', {srid}, 'MULTIPOLYGON', 'XY');
 ```
 
-> **Divergence from the original design.** The original design kept, for a
-> partially overlapping feature, its non-intersected remainder
-> (`ST_Difference(a.geom, ST_Union(b.geom))`). The current SQL does not: a target
-> feature that touches the assessment layer contributes **only** its intersection.
-> Consequently the per-feature `coverage_pct` shown in the Results Grid and the
-> histogram is always 100 % (touches) or 0 % (does not touch).
+> **Coverage per target feature (F-02, 2026-11-26).** The original design stored
+> the non-intersected remainder as geometry (`ST_Difference(a.geom, ST_Union(b.geom))`).
+> It is stored as an **area** instead: every row carries `source_area`, and
+> `result_queries.py` derives per `input_id`:
+>
+> | Column | Formula |
+> |---|---|
+> | `total_area` | `MAX(source_area)` |
+> | `intersect_area` | `MIN(Area(GUnion(intersect fragments)), total_area)`: the union, so overlapping assessment polygons are not counted twice |
+> | `no_overlap_area` | `total_area - intersect_area` |
+> | `coverage_pct` | `intersect_area * 100 / total_area` |
+>
+> Tables written before F-02 have no `source_area` and keep the old formulas
+> (sums of the stored fragments), so their coverage is 0 % or 100 %. Before F-02 a
+> feature that only touched an assessment polygon along an edge produced no row at
+> all; now it gets a `no_overlap` row (coverage 0 %).
+>
+> With several assessment layers, each step intersects **all** rows of the previous
+> step, including its `no_overlap` rows. A feature that misses layer 1 but overlaps
+> layer 2 therefore counts as covered: coverage is relative to the original feature,
+> but the layers are not combined as a strict AND.
 
 ---
 
